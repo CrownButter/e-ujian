@@ -32,6 +32,12 @@ class Auth extends BaseController
 
     public function auth()
     {
+        $profileEnabled = $this->request->getHeaderLine('X-Auth-Profile') === '1';
+        $profileStart = microtime(true);
+        $profile = [];
+
+        $validationStart = microtime(true);
+
         $validation = $this->validate([
             'username' => [
                 'label' => 'username',
@@ -53,10 +59,16 @@ class Auth extends BaseController
             return redirect()->to('login')->withInput();
         }
 
+        if ($profileEnabled) {
+            $profile['validation'] = $this->profileMs($validationStart);
+        }
+
         $username = (string) $this->request->getPost('username');
         $password = (string) $this->request->getPost('password');
 
         $model = new UserModel();
+
+        $userQueryStart = microtime(true);
 
         // Fetch only the user fields required by the authentication flow.
         $user = $model
@@ -64,7 +76,18 @@ class Auth extends BaseController
             ->where('username', $username)
             ->first();
 
-        if (!$user || !password_verify($password, $user['password'])) {
+        if ($profileEnabled) {
+            $profile['user_query'] = $this->profileMs($userQueryStart);
+        }
+
+        $passwordStart = microtime(true);
+        $passwordValid = $user && password_verify($password, $user['password']);
+
+        if ($profileEnabled) {
+            $profile['password_verify'] = $this->profileMs($passwordStart);
+        }
+
+        if (!$passwordValid) {
             session()->setFlashdata('msg', 'Username atau Password salah');
             return redirect()->to('/login');
         }
@@ -79,12 +102,10 @@ class Auth extends BaseController
         $namaLengkap = 'User';
 
         $db = \Config\Database::connect();
+        $profileQueryStart = microtime(true);
 
         // Student login is the hot path for concurrent exam users.
-        // Fetch student name and pleton name in one query instead of:
-        //   1) siswa by user_id
-        //   2) pleton by siswa.pleton_id
-        //   3) siswa again through getNamaLengkap()
+        // Fetch student name and pleton name in one query.
         if ($roleId === 7) {
             $siswa = $db->table('siswa')
                 ->select('siswa.nama, pleton.nama_pleton')
@@ -101,8 +122,7 @@ class Auth extends BaseController
                 }
             }
         } else {
-            // Keep the existing staff role behavior, but avoid a second
-            // profile lookup just to get the display name.
+            // Keep the existing staff role behavior.
             if (in_array($roleId, [4, 5, 6], true)) {
                 $pegawai = $db->table('pegawai')
                     ->select('id, nama, nomor_induk')
@@ -156,17 +176,23 @@ class Auth extends BaseController
                 }
             } elseif ($roleId !== 1) {
                 $profileTable = $roleId === 7 ? 'siswa' : 'pegawai';
-                $profile = $db->table($profileTable)
+                $staffProfile = $db->table($profileTable)
                     ->select('nama')
                     ->where('user_id', $user['id'])
                     ->get()
                     ->getRow();
 
-                if ($profile) {
-                    $namaLengkap = $profile->nama ?? 'User';
+                if ($staffProfile) {
+                    $namaLengkap = $staffProfile->nama ?? 'User';
                 }
             }
         }
+
+        if ($profileEnabled) {
+            $profile['profile_query'] = $this->profileMs($profileQueryStart);
+        }
+
+        $sessionStart = microtime(true);
 
         session()->set([
             'user_id'       => $user['id'],
@@ -180,11 +206,32 @@ class Auth extends BaseController
             'logged_in'     => true,
         ]);
 
-        if ($roleId === 1) {
-            return redirect()->to('/dashboard');
+        if ($profileEnabled) {
+            $profile['session'] = $this->profileMs($sessionStart);
+            $profile['total'] = $this->profileMs($profileStart);
         }
 
-        return redirect()->to('/' . $roleKey . '/users/profil');
+        $redirectUrl = $roleId === 1
+            ? '/dashboard'
+            : '/' . $roleKey . '/users/profil';
+
+        $response = redirect()->to($redirectUrl);
+
+        if ($profileEnabled) {
+            foreach ($profile as $name => $milliseconds) {
+                $response->setHeader(
+                    'X-Auth-Profile-' . $name,
+                    number_format($milliseconds, 3, '.', '')
+                );
+            }
+        }
+
+        return $response;
+    }
+
+    private function profileMs(float $start): float
+    {
+        return (microtime(true) - $start) * 1000;
     }
 
     public function logout()
