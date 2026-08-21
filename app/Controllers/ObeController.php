@@ -726,7 +726,9 @@ class ObeController extends BaseController
         $soal = [];
         if (!empty($ujian['mata_pelajaran_id'])) {
             $soal = $db->table('soal_obe')
+                ->where('kelas_ujian_id', $kelasUjianId)
                 ->where('mapel_id', $ujian['mata_pelajaran_id'])
+                ->orderBy('id', 'ASC')
                 ->get()
                 ->getResultArray();
         }
