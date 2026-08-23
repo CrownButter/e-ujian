@@ -7,6 +7,29 @@ const LOGIN_PATH = '/login';
 const AUTH_PATH = '/auth';
 const SUCCESS_PATH = '/siswa/users/profil';
 
+// VUS controls how many accounts are tested concurrently.
+// Example: VUS=1 => account 001, VUS=10 => 001-010, VUS=709 => 001-709.
+const VUS = parsePositiveInt(__ENV.VUS, 709);
+const ITERATIONS = parsePositiveInt(__ENV.ITERATIONS, VUS);
+const MAX_ACCOUNT = 709;
+
+if (VUS > MAX_ACCOUNT) {
+  throw new Error(`VUS cannot exceed ${MAX_ACCOUNT}. Received: ${VUS}`);
+}
+
+if (ITERATIONS < VUS) {
+  throw new Error(`ITERATIONS must be >= VUS so every VU can receive a unique account. Received VUS=${VUS}, ITERATIONS=${ITERATIONS}`);
+}
+
+function parsePositiveInt(value, fallback) {
+  if (value === undefined || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`Expected a positive integer, received: ${value}`);
+  }
+  return parsed;
+}
+
 const loginAttempts = new Counter('login_attempts');
 const loginSuccess = new Counter('login_success');
 const loginFailure = new Counter('login_failure');
@@ -17,8 +40,8 @@ export const options = {
   scenarios: {
     concurrent_logins: {
       executor: 'shared-iterations',
-      vus: 709,
-      iterations: 709,
+      vus: VUS,
+      iterations: ITERATIONS,
       maxDuration: '10m',
     },
   },
@@ -37,8 +60,11 @@ function extractCsrf(html) {
 }
 
 function accountForVU() {
+  // __VU is 1-based. With VUS=N, VU N uses account N.
   const number = __VU;
-  if (number < 1 || number > 709) throw new Error(`Unexpected VU number: ${number}`);
+  if (number < 1 || number > VUS || number > MAX_ACCOUNT) {
+    throw new Error(`Unexpected VU number: ${number}`);
+  }
   return String(number).padStart(3, '0');
 }
 
@@ -101,9 +127,9 @@ export function handleSummary(data) {
     test: {
       name: 'E-UJIAN concurrent login',
       base_url: BASE_URL,
-      accounts: '001-709',
-      vus: 709,
-      iterations: 709,
+      accounts: `001-${String(VUS).padStart(3, '0')}`,
+      vus: VUS,
+      iterations: ITERATIONS,
       generated_at: new Date().toISOString(),
     },
     result: {
@@ -116,7 +142,7 @@ export function handleSummary(data) {
   };
 
   return {
-    stdout: `\nE-UJIAN K6 LOGIN TEST\n=====================\nBASE_URL       : ${BASE_URL}\nACCOUNTS       : 001-709\nTOTAL ATTEMPTS : ${attempts}\nSUCCESS        : ${success}\nFAILURE        : ${failure}\nSUCCESS RATE   : ${(successRate * 100).toFixed(2)}%\n`,
+    stdout: `\nE-UJIAN K6 LOGIN TEST\n=====================\nBASE_URL       : ${BASE_URL}\nACCOUNTS       : 001-${String(VUS).padStart(3, '0')}\nVUS            : ${VUS}\nITERATIONS     : ${ITERATIONS}\nTOTAL ATTEMPTS : ${attempts}\nSUCCESS        : ${success}\nFAILURE        : ${failure}\nSUCCESS RATE   : ${(successRate * 100).toFixed(2)}%\n`,
     [__ENV.K6_SUMMARY_FILE || 'summary.json']: JSON.stringify(report, null, 2),
   };
 }
