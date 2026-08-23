@@ -17,7 +17,7 @@ $iterations = if ($env:ITERATIONS) { [int]$env:ITERATIONS } else { $vus }
 $baseUrl = if ($env:BASE_URL) { $env:BASE_URL } else { 'http://localhost:8080' }
 
 if ($vus -lt 1 -or $vus -gt 709) { throw 'VUS must be between 1 and 709.' }
-if ($iterations -lt $vus) { throw 'ITERATIONS must be greater than or equal to VUS.' }
+if ($iterations -ne $vus) { throw 'ITERATIONS must equal VUS. The K6 test now uses exactly 1 iteration per VU.' }
 
 $reportDir = Join-Path $reportRoot "${timestamp}_${vus}vu"
 $dockerCsv = Join-Path $reportDir 'docker-stats.csv'
@@ -35,7 +35,7 @@ Write-Host '============================================================' -Foreg
 Write-Host "Timestamp  : $timestamp"
 Write-Host "BASE_URL   : $baseUrl"
 Write-Host "VUS        : $vus"
-Write-Host "ITERATIONS : $iterations"
+Write-Host "ITERATIONS : $iterations (1 per VU)"
 Write-Host "Accounts   : 001-$('{0:D3}' -f $vus)"
 Write-Host "Report     : $reportDir"
 Write-Host ''
@@ -130,7 +130,7 @@ $k6ExitCode = 1
 
 try {
     Write-Host ''
-    Write-Host "Running K6: $vus VUs / $iterations iterations..." -ForegroundColor Yellow
+    Write-Host "Running K6: $vus VUs / 1 iteration per VU..." -ForegroundColor Yellow
     $env:K6_SUMMARY_FILE = $summaryFile
     & k6 run -e "BASE_URL=$baseUrl" -e "VUS=$vus" -e "ITERATIONS=$iterations" $k6Script
     $k6ExitCode = $LASTEXITCODE
@@ -153,6 +153,8 @@ $metadata = [ordered]@{
     base_url = $baseUrl
     vus = $vus
     iterations = $iterations
+    iterations_per_vu = 1
+    executor = 'per-vu-iterations'
     account_range = "001-$('{0:D3}' -f $vus)"
     k6_exit_code = $k6ExitCode
 }
