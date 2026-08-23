@@ -20,6 +20,8 @@ class Auth extends BaseController
 
     public function auth()
     {
+        $authStart = hrtime(true);
+
         $validation = $this->validate([
             'username' => [
                 'label' => 'username',
@@ -37,14 +39,15 @@ class Auth extends BaseController
             return redirect()->to('login')->withInput();
         }
 
+        $validationMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
         $username = $this->request->getPost('username');
         $password = $this->request->getPost('password');
 
         $db = \Config\Database::connect();
 
+        $dbStart = hrtime(true);
+
         // 1 QUERY GABUNGAN: user + role + profil pegawai/siswa sekaligus.
-        // Sebelumnya ini 3-5 query terpisah (UserModel, RoleModel, pegawai/siswa,
-        // lalu getNamaLengkap() query ulang tabel yang sama).
         $data = $db->table('users')
             ->select('
                 users.id, users.username, users.password, users.role_id,
@@ -59,10 +62,22 @@ class Auth extends BaseController
             ->get()
             ->getRowArray();
 
-        // password_verify dulu (CPU-bound, gak butuh DB), baru cek data user.
-        // Urutan gak masalah untuk timing attack di sini karena tetap constant-ish,
-        // tapi cek $data dulu untuk hindari null-password error.
-        if (!$data || !password_verify($password, $data['password'])) {
+        $dbMs = round((hrtime(true) - $dbStart) / 1_000_000, 3);
+
+        $passwordStart = hrtime(true);
+        $passwordValid = $data && password_verify($password, $data['password']);
+        $passwordMs = round((hrtime(true) - $passwordStart) / 1_000_000, 3);
+
+        if (!$data || !$passwordValid) {
+            $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+            log_message('info', 'AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms', [
+                'username' => $username,
+                'total' => $authMs,
+                'validation' => $validationMs,
+                'db' => $dbMs,
+                'password' => $passwordMs,
+            ]);
+
             session()->setFlashdata('msg', 'Username atau Password salah');
             return redirect()->to('/login');
         }
@@ -75,14 +90,15 @@ class Auth extends BaseController
         $nama_pleton = '';
         $nama_kompi = '';
         $nama_batalyon = '';
+        $unitMs = 0.0;
 
-        // Query kedua (opsional) HANYA untuk role yang butuh data unit,
-        // dan hanya 1 query (bukan 2 seperti sebelumnya: pegawai lookup + unit lookup).
         $unitTableByRole = [
             4 => ['table' => 'pleton',    'col' => 'danton_id', 'nameCol' => 'nama_pleton',   'var' => 'nama_pleton'],
             5 => ['table' => 'kompi',     'col' => 'danki_id',  'nameCol' => 'nama_kompi',    'var' => 'nama_kompi'],
             6 => ['table' => 'batalyon',  'col' => 'danyon_id', 'nameCol' => 'nama_batalyon', 'var' => 'nama_batalyon'],
         ];
+
+        $unitStart = hrtime(true);
 
         if (isset($unitTableByRole[$data['role_id']]) && $data['pegawai_id']) {
             $u = $unitTableByRole[$data['role_id']];
@@ -100,13 +116,16 @@ class Auth extends BaseController
                 session()->set($u['var'], $row->{$u['nameCol']});
             }
         } elseif ($data['role_id'] == 7 && $data['siswa_pleton_id']) {
-            // pleton_id sudah didapat dari query gabungan di atas, tinggal 1 query lookup nama pleton
             $pleton = $db->table('pleton')->where('id', $data['siswa_pleton_id'])->get()->getRow();
             if ($pleton) {
                 $nama_pleton = ' - ' . $pleton->nama_pleton;
                 session()->set('nama_pleton', $pleton->nama_pleton);
             }
         }
+
+        $unitMs = round((hrtime(true) - $unitStart) / 1_000_000, 3);
+
+        $sessionStart = hrtime(true);
 
         session()->set([
             'user_id'       => $data['id'],
@@ -118,6 +137,19 @@ class Auth extends BaseController
             'nama_batalyon' => $nama_batalyon,
             'nama'          => $nama,
             'logged_in'     => true
+        ]);
+
+        $sessionMs = round((hrtime(true) - $sessionStart) / 1_000_000, 3);
+        $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+
+        log_message('info', 'AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms unit={unit}ms session={session}ms', [
+            'username' => $username,
+            'total' => $authMs,
+            'validation' => $validationMs,
+            'db' => $dbMs,
+            'password' => $passwordMs,
+            'unit' => $unitMs,
+            'session' => $sessionMs,
         ]);
 
         if ($data['role_id'] == 7) {
