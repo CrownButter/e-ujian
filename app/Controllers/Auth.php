@@ -2,8 +2,6 @@
 
 namespace App\Controllers;
 
-use App\Models\UserModel;
-
 class Auth extends BaseController
 {
     protected $helpers = ['url', 'form'];
@@ -44,34 +42,26 @@ class Auth extends BaseController
         $password = $this->request->getPost('password');
 
         $db = \Config\Database::connect();
-        $dbStart = hrtime(true);
 
-        // Single login lookup. For students, pleton name is resolved here as well,
-        // avoiding the second pleton query after password verification.
-        $data = $db->table('users')
-            ->select(''
-                . 'users.id, users.username, users.password, users.role_id, '
-                . 'roles.nama_role, '
-                . 'pegawai.id as pegawai_id, pegawai.nama as nama_pegawai, '
-                . 'pegawai.nomor_induk as pegawai_nomor_induk, '
-                . 'siswa.nama as nama_siswa, siswa.pleton_id as siswa_pleton_id, '
-                . 'pleton_siswa.nama_pleton as siswa_nama_pleton'
-            )
-            ->join('roles', 'roles.id = users.role_id', 'left')
-            ->join('pegawai', 'pegawai.user_id = users.id', 'left')
-            ->join('siswa', 'siswa.user_id = users.id', 'left')
-            ->join('pleton as pleton_siswa', 'pleton_siswa.id = siswa.pleton_id', 'left')
-            ->where('users.username', $username)
+        // CRITICAL AUTH PATH:
+        // Only fetch the fields required to authenticate the account.
+        // Do not join role/profile/unit tables before password_verify().
+        // This keeps the DB work before the CPU-bound bcrypt operation minimal.
+        $dbStart = hrtime(true);
+        $user = $db->table('users')
+            ->select('id, username, password, role_id')
+            ->where('username', $username)
             ->get()
             ->getRowArray();
-
         $dbMs = round((hrtime(true) - $dbStart) / 1_000_000, 3);
 
+        // bcrypt remains the security boundary. Do not lower the cost merely
+        // to improve the load-test result.
         $passwordStart = hrtime(true);
-        $passwordValid = $data && password_verify($password, $data['password']);
+        $passwordValid = $user && password_verify($password, $user['password']);
         $passwordMs = round((hrtime(true) - $passwordStart) / 1_000_000, 3);
 
-        if (!$data || !$passwordValid) {
+        if (!$user || !$passwordValid) {
             $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
             log_message('info', 'AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms', [
                 'username' => $username,
@@ -85,19 +75,55 @@ class Auth extends BaseController
             return redirect()->to('/login');
         }
 
-        $roleId = (int) $data['role_id'];
-        $namaRole = $data['nama_role'] ?? 'User';
+        $roleId = (int) $user['role_id'];
+
+        // PROFILE PATH:
+        // Only load profile/role data after the password has been verified.
+        // This prevents failed logins from doing unnecessary joins and keeps
+        // the pre-bcrypt critical path as small as possible.
+        $profileStart = hrtime(true);
+
+        $profile = $db->table('users')
+            ->select('users.id, users.username, users.role_id, roles.nama_role, '
+                . 'pegawai.id as pegawai_id, pegawai.nama as nama_pegawai, '
+                . 'pegawai.nomor_induk as pegawai_nomor_induk, '
+                . 'siswa.nama as nama_siswa, siswa.pleton_id as siswa_pleton_id, '
+                . 'pleton_siswa.nama_pleton as siswa_nama_pleton')
+            ->join('roles', 'roles.id = users.role_id', 'left')
+            ->join('pegawai', 'pegawai.user_id = users.id', 'left')
+            ->join('siswa', 'siswa.user_id = users.id', 'left')
+            ->join('pleton as pleton_siswa', 'pleton_siswa.id = siswa.pleton_id', 'left')
+            ->where('users.id', $user['id'])
+            ->get()
+            ->getRowArray();
+
+        $profileMs = round((hrtime(true) - $profileStart) / 1_000_000, 3);
+
+        if (!$profile) {
+            $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+            log_message('info', 'AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms profile={profile}ms', [
+                'username' => $username,
+                'total' => $authMs,
+                'validation' => $validationMs,
+                'db' => $dbMs,
+                'password' => $passwordMs,
+                'profile' => $profileMs,
+            ]);
+
+            session()->setFlashdata('msg', 'Data pengguna tidak ditemukan');
+            return redirect()->to('/login');
+        }
+
+        $namaRole = $profile['nama_role'] ?? 'User';
         $nama = ($roleId === 7)
-            ? ($data['nama_siswa'] ?? 'User')
-            : ($data['nama_pegawai'] ?? 'User');
+            ? ($profile['nama_siswa'] ?? 'User')
+            : ($profile['nama_pegawai'] ?? 'User');
 
         $nama_pleton = '';
         $nama_kompi = '';
         $nama_batalyon = '';
         $unitMs = 0.0;
 
-        // Unit lookup remains only for staff roles that require it.
-        // Student pleton is already resolved by the single login query above.
         $unitTableByRole = [
             4 => ['table' => 'pleton',   'col' => 'danton_id', 'nameCol' => 'nama_pleton',   'var' => 'nama_pleton'],
             5 => ['table' => 'kompi',    'col' => 'danki_id',  'nameCol' => 'nama_kompi',    'var' => 'nama_kompi'],
@@ -106,11 +132,11 @@ class Auth extends BaseController
 
         $unitStart = hrtime(true);
 
-        if (isset($unitTableByRole[$roleId]) && $data['pegawai_id']) {
+        if (isset($unitTableByRole[$roleId]) && !empty($profile['pegawai_id'])) {
             $u = $unitTableByRole[$roleId];
             $row = $db->table($u['table'])
-                ->where($u['col'], $data['pegawai_nomor_induk'])
-                ->orWhere($u['col'], $data['pegawai_id'])
+                ->where($u['col'], $profile['pegawai_nomor_induk'])
+                ->orWhere($u['col'], $profile['pegawai_id'])
                 ->get()
                 ->getRow();
 
@@ -120,18 +146,17 @@ class Auth extends BaseController
                 if ($u['var'] === 'nama_kompi') $nama_kompi = ' - ' . $value;
                 if ($u['var'] === 'nama_batalyon') $nama_batalyon = ' - ' . $value;
             }
-        } elseif ($roleId === 7 && !empty($data['siswa_nama_pleton'])) {
-            $nama_pleton = ' - ' . $data['siswa_nama_pleton'];
+        } elseif ($roleId === 7 && !empty($profile['siswa_nama_pleton'])) {
+            $nama_pleton = ' - ' . $profile['siswa_nama_pleton'];
         }
 
         $unitMs = round((hrtime(true) - $unitStart) / 1_000_000, 3);
 
-        // One session write after all values have been resolved.
         $sessionStart = hrtime(true);
 
-        $sessionData = [
-            'user_id'       => $data['id'],
-            'username'      => $data['username'],
+        session()->set([
+            'user_id'       => $user['id'],
+            'username'      => $user['username'],
             'role_id'       => $roleId,
             'nama_role'     => $namaRole,
             'nama_pleton'   => $nama_pleton,
@@ -139,19 +164,18 @@ class Auth extends BaseController
             'nama_batalyon' => $nama_batalyon,
             'nama'          => $nama,
             'logged_in'     => true
-        ];
-
-        session()->set($sessionData);
+        ]);
 
         $sessionMs = round((hrtime(true) - $sessionStart) / 1_000_000, 3);
         $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
 
-        log_message('info', 'AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms unit={unit}ms session={session}ms', [
+        log_message('info', 'AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms profile={profile}ms unit={unit}ms session={session}ms', [
             'username' => $username,
             'total' => $authMs,
             'validation' => $validationMs,
             'db' => $dbMs,
             'password' => $passwordMs,
+            'profile' => $profileMs,
             'unit' => $unitMs,
             'session' => $sessionMs,
         ]);
