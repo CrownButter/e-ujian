@@ -44,20 +44,23 @@ class Auth extends BaseController
         $password = $this->request->getPost('password');
 
         $db = \Config\Database::connect();
-
         $dbStart = hrtime(true);
 
-        // 1 QUERY GABUNGAN: user + role + profil pegawai/siswa sekaligus.
+        // Single login lookup. For students, pleton name is resolved here as well,
+        // avoiding the second pleton query after password verification.
         $data = $db->table('users')
-            ->select('
-                users.id, users.username, users.password, users.role_id,
-                roles.nama_role,
-                pegawai.id as pegawai_id, pegawai.nama as nama_pegawai, pegawai.nomor_induk as pegawai_nomor_induk,
-                siswa.nama as nama_siswa, siswa.pleton_id as siswa_pleton_id
-            ')
+            ->select(''
+                . 'users.id, users.username, users.password, users.role_id, '
+                . 'roles.nama_role, '
+                . 'pegawai.id as pegawai_id, pegawai.nama as nama_pegawai, '
+                . 'pegawai.nomor_induk as pegawai_nomor_induk, '
+                . 'siswa.nama as nama_siswa, siswa.pleton_id as siswa_pleton_id, '
+                . 'pleton_siswa.nama_pleton as siswa_nama_pleton'
+            )
             ->join('roles', 'roles.id = users.role_id', 'left')
             ->join('pegawai', 'pegawai.user_id = users.id', 'left')
             ->join('siswa', 'siswa.user_id = users.id', 'left')
+            ->join('pleton as pleton_siswa', 'pleton_siswa.id = siswa.pleton_id', 'left')
             ->where('users.username', $username)
             ->get()
             ->getRowArray();
@@ -82,8 +85,9 @@ class Auth extends BaseController
             return redirect()->to('/login');
         }
 
+        $roleId = (int) $data['role_id'];
         $namaRole = $data['nama_role'] ?? 'User';
-        $nama = ($data['role_id'] == 7)
+        $nama = ($roleId === 7)
             ? ($data['nama_siswa'] ?? 'User')
             : ($data['nama_pegawai'] ?? 'User');
 
@@ -92,16 +96,18 @@ class Auth extends BaseController
         $nama_batalyon = '';
         $unitMs = 0.0;
 
+        // Unit lookup remains only for staff roles that require it.
+        // Student pleton is already resolved by the single login query above.
         $unitTableByRole = [
-            4 => ['table' => 'pleton',    'col' => 'danton_id', 'nameCol' => 'nama_pleton',   'var' => 'nama_pleton'],
-            5 => ['table' => 'kompi',     'col' => 'danki_id',  'nameCol' => 'nama_kompi',    'var' => 'nama_kompi'],
-            6 => ['table' => 'batalyon',  'col' => 'danyon_id', 'nameCol' => 'nama_batalyon', 'var' => 'nama_batalyon'],
+            4 => ['table' => 'pleton',   'col' => 'danton_id', 'nameCol' => 'nama_pleton',   'var' => 'nama_pleton'],
+            5 => ['table' => 'kompi',    'col' => 'danki_id',  'nameCol' => 'nama_kompi',    'var' => 'nama_kompi'],
+            6 => ['table' => 'batalyon', 'col' => 'danyon_id', 'nameCol' => 'nama_batalyon', 'var' => 'nama_batalyon'],
         ];
 
         $unitStart = hrtime(true);
 
-        if (isset($unitTableByRole[$data['role_id']]) && $data['pegawai_id']) {
-            $u = $unitTableByRole[$data['role_id']];
+        if (isset($unitTableByRole[$roleId]) && $data['pegawai_id']) {
+            $u = $unitTableByRole[$roleId];
             $row = $db->table($u['table'])
                 ->where($u['col'], $data['pegawai_nomor_induk'])
                 ->orWhere($u['col'], $data['pegawai_id'])
@@ -109,35 +115,33 @@ class Auth extends BaseController
                 ->getRow();
 
             if ($row) {
-                $value = ' - ' . $row->{$u['nameCol']};
-                if ($u['var'] === 'nama_pleton') $nama_pleton = $value;
-                if ($u['var'] === 'nama_kompi') $nama_kompi = $value;
-                if ($u['var'] === 'nama_batalyon') $nama_batalyon = $value;
-                session()->set($u['var'], $row->{$u['nameCol']});
+                $value = $row->{$u['nameCol']};
+                if ($u['var'] === 'nama_pleton') $nama_pleton = ' - ' . $value;
+                if ($u['var'] === 'nama_kompi') $nama_kompi = ' - ' . $value;
+                if ($u['var'] === 'nama_batalyon') $nama_batalyon = ' - ' . $value;
             }
-        } elseif ($data['role_id'] == 7 && $data['siswa_pleton_id']) {
-            $pleton = $db->table('pleton')->where('id', $data['siswa_pleton_id'])->get()->getRow();
-            if ($pleton) {
-                $nama_pleton = ' - ' . $pleton->nama_pleton;
-                session()->set('nama_pleton', $pleton->nama_pleton);
-            }
+        } elseif ($roleId === 7 && !empty($data['siswa_nama_pleton'])) {
+            $nama_pleton = ' - ' . $data['siswa_nama_pleton'];
         }
 
         $unitMs = round((hrtime(true) - $unitStart) / 1_000_000, 3);
 
+        // One session write after all values have been resolved.
         $sessionStart = hrtime(true);
 
-        session()->set([
+        $sessionData = [
             'user_id'       => $data['id'],
             'username'      => $data['username'],
-            'role_id'       => $data['role_id'],
+            'role_id'       => $roleId,
             'nama_role'     => $namaRole,
             'nama_pleton'   => $nama_pleton,
             'nama_kompi'    => $nama_kompi,
             'nama_batalyon' => $nama_batalyon,
             'nama'          => $nama,
             'logged_in'     => true
-        ]);
+        ];
+
+        session()->set($sessionData);
 
         $sessionMs = round((hrtime(true) - $sessionStart) / 1_000_000, 3);
         $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
@@ -152,7 +156,7 @@ class Auth extends BaseController
             'session' => $sessionMs,
         ]);
 
-        if ($data['role_id'] == 7) {
+        if ($roleId === 7) {
             return redirect()->to('/siswa/users/profil');
         }
         return redirect()->to('/dashboard');
