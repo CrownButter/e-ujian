@@ -436,6 +436,7 @@
     }
 
     // Proses AJAX Simpan Nilai
+    // Proses AJAX Simpan Nilai
     $('#formSimpanNilai').on('submit', function(e) {
         e.preventDefault();
 
@@ -449,7 +450,11 @@
         formData.append('siswa_id', siswaId);
         formData.append('status_pengerjaan', 'selesai');
 
-        fetch(`<?= base_url('gadik/obe/penilaian/simpan') ?>`, {
+        // Mengambil segment pertama URL aktif (misal: admin, gadik, dll) secara otomatis
+        const currentPrefix = window.location.pathname.split('/')[1];
+        const dynamicUrl = `/${currentPrefix}/obe/penilaian/simpan`;
+
+        fetch(dynamicUrl, {
                 method: 'POST',
                 body: formData
             })
@@ -463,7 +468,7 @@
                         timer: 1500,
                         showConfirmButton: false
                     }).then(() => {
-                        window.location.href = `<?= base_url('gadik/obe/penilaian/kelas/') ?>` + kelasUjianId;
+                        window.location.href = `/${currentPrefix}/obe/penilaian/kelas/` + kelasUjianId;
                     });
                 } else {
                     Swal.fire({

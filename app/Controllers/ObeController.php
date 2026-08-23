@@ -726,9 +726,7 @@ class ObeController extends BaseController
         $soal = [];
         if (!empty($ujian['mata_pelajaran_id'])) {
             $soal = $db->table('soal_obe')
-                ->where('kelas_ujian_id', $kelasUjianId)
                 ->where('mapel_id', $ujian['mata_pelajaran_id'])
-                ->orderBy('id', 'ASC')
                 ->get()
                 ->getResultArray();
         }
@@ -1597,151 +1595,443 @@ class ObeController extends BaseController
         exit;
     }
 
-    public function exportPdf($kelasUjianId)
-    {
-        $db = \Config\Database::connect();
-        $sort = $this->request->getGet('sort');
-        $orderBy = ($sort == 'nilai') ? 'nu.nilai_akhir DESC' : 's.nosis ASC';
+public function exportPdf($kelasUjianId)
+{
+    ini_set('max_execution_time', '300');
 
-        $ujian = $db->table('kelas_ujian ku')
-            ->select('ku.*, mp.nama_mapel, p.nama as nama_gadik, pg.nama_pangkat')
-            ->join('mata_pelajaran mp', 'mp.id = ku.mata_pelajaran_id', 'left')
-            ->join('pegawai p', 'p.id = ku.penguji_id', 'left')
-            ->join('pangkat pg', 'pg.id = p.pangkat_id', 'left')
-            ->where('ku.id', $kelasUjianId)
-            ->get()->getRowArray();
+    $db = \Config\Database::connect();
 
-        $angkatan = $db->table('kelas_ujian_peserta cup')
-            ->select('a.nama_angkatan, a.tahun_angkatan')
-            ->join('siswa s', 's.id = cup.siswa_id', 'left')
-            ->join('angkatan a', 'a.id = s.angkatan_id', 'left')
-            ->where('cup.kelas_ujian_id', $kelasUjianId)
-            ->get()->getRowArray();
+    $sort = $this->request->getGet('sort');
 
-        $peserta = $db->table('kelas_ujian_peserta cup')
-            ->select('cup.*, s.nama AS nama_siswa, s.nosis, nu.nilai_akhir')
-            ->join('siswa s', 's.id = cup.siswa_id', 'left')
-            ->join('nilai_ujian nu', 'nu.kelas_ujian_id = cup.kelas_ujian_id AND nu.siswa_id = cup.siswa_id', 'left')
-            ->where('cup.kelas_ujian_id', $kelasUjianId)
-            ->orderBy($orderBy)
-            ->get()->getResultArray();
+    // ============================================================
+    // 1. DETAIL UJIAN
+    // ============================================================
+    $ujian = $db->table('kelas_ujian ku')
+        ->select('
+            ku.id,
+            ku.nama_kelas,
+            ku.tanggal,
+            ku.jam_mulai,
+            ku.jam_selesai,
+            mp.nama_mapel,
+            p.nama AS nama_gadik,
+            pg.nama_pangkat
+        ')
+        ->join('mata_pelajaran mp', 'mp.id = ku.mata_pelajaran_id', 'left')
+        ->join('pegawai p', 'p.id = ku.penguji_id', 'left')
+        ->join('pangkat pg', 'pg.id = p.pangkat_id', 'left')
+        ->where('ku.id', $kelasUjianId)
+        ->get()
+        ->getRowArray();
 
-        // Hitung Jumlah Peserta Ujian secara otomatis
-        $jumlahPeserta = count($peserta);
-
-        // Format Bulan & Hari Bahasa Indonesia
-        $namaBulan = [
-            '01' => 'Januari',
-            '02' => 'Februari',
-            '03' => 'Maret',
-            '04' => 'April',
-            '05' => 'Mei',
-            '06' => 'Juni',
-            '07' => 'Juli',
-            '08' => 'Agustus',
-            '09' => 'September',
-            '10' => 'Oktober',
-            '11' => 'November',
-            '12' => 'Desember'
-        ];
-        $hariIndo = [
-            'Sun' => 'Minggu',
-            'Mon' => 'Senin',
-            'Tue' => 'Selasa',
-            'Wed' => 'Rabu',
-            'Thu' => 'Kamis',
-            'Fri' => 'Jumat',
-            'Sat' => 'Sabtu'
-        ];
-
-        $hariUjian = '-';
-        $tanggalUjian = '-';
-        if (!empty($ujian['tanggal'])) {
-            $tglKey = date('d', strtotime($ujian['tanggal']));
-            $blnKey = date('m', strtotime($ujian['tanggal']));
-            $thnKey = date('Y', strtotime($ujian['tanggal']));
-            $hariKey = date('D', strtotime($ujian['tanggal']));
-
-            $hariUjian = $hariIndo[$hariKey] ?? '-';
-            $namaBlnFull = $namaBulan[$blnKey] ?? '';
-            $tanggalUjian = "{$tglKey} {$namaBlnFull} {$thnKey}";
-        }
-
-        $jamMulai = !empty($ujian['jam_mulai']) ? date('H:i', strtotime($ujian['jam_mulai'])) : '-';
-        $jamSelesai = !empty($ujian['jam_selesai']) ? date('H:i', strtotime($ujian['jam_selesai'])) : '-';
-        $waktuUjian = "Pukul {$jamMulai} - {$jamSelesai} WIB";
-        $gadikPenguji = (!empty($ujian['nama_pangkat']) ? $ujian['nama_pangkat'] . ' ' : '') . ($ujian['nama_gadik'] ?? '-');
-
-        // Render HTML untuk PDF
-        $html = "
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body { font-family: sans-serif; font-size: 11pt; }
-                h2 { text-align: center; margin-bottom: 5px; }
-                .subtitle { text-align: center; margin-top: 0; margin-bottom: 20px; font-weight: bold; }
-                table.info { width: 100%; border: none; border-collapse: collapse; margin-bottom: 15px; }
-                table.info td { border: none; vertical-align: top; padding: 2px 0; }
-                table.data { width: 100%; border-collapse: collapse; margin-top: 10px; }
-                table.data th, table.data td { border: 1px solid #000; padding: 6px; font-size: 10pt; }
-                table.data th { background-color: #d9d9d9; text-align: center; }
-            </style>
-        </head>
-        <body>
-            <h2>REKAPITULASI NILAI UJIAN OBE</h2>
-            <div class='subtitle'>SISWA DIKTUK BINTARA POLWAN " . ($angkatan['nama_angkatan'] ?? '-') . " TAHUN ANGKATAN " . ($angkatan['tahun_angkatan'] ?? '-') . "/" . (($angkatan['tahun_angkatan'] ?? 0) + 1) . "</div>
-
-            <table class='info'>
-                <tr>
-                    <td style='width: 45%;'>
-                        <b>Kelas Ujian</b> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: " . ($ujian['nama_kelas'] ?? '-') . "<br>
-                        <b>Mata Pelajaran</b> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: " . ($ujian['nama_mapel'] ?? '-') . "<br>
-                        <b>Jumlah Peserta</b> &nbsp;&nbsp;&nbsp;: " . $jumlahPeserta . " Siswa
-                    </td>
-                    <td style='width: 55%;'>
-                        <b>Hari</b> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: " . $hariUjian . "<br>
-                        <b>Tanggal</b> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: " . $tanggalUjian . "<br>
-                        <b>Waktu</b> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: " . $waktuUjian . "<br>
-                        <b>Gadik Penguji</b> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: " . $gadikPenguji . "
-                    </td>
-                </tr>
-            </table>
-
-            <table class='data'>
-                <thead>
-                    <tr>
-                        <th style='width: 5%;'>No</th>
-                        <th style='width: 15%;'>Nosis</th>
-                        <th style='width: 45%;'>Nama Siswa</th>
-                        <th style='width: 15%;'>Nilai Akhir</th>
-                        <th style='width: 20%;'>Status</th>
-                    </tr>
-                </thead>
-                <tbody>";
-
-        $no = 1;
-        foreach ($peserta as $p) {
-            $status = !empty($p['nilai_akhir']) ? 'Sudah Dinilai' : 'Belum Dinilai';
-            $nilai = !empty($p['nilai_akhir']) ? number_format($p['nilai_akhir'], 2) : '-';
-
-            $html .= "<tr>
-                <td style='text-align:center;'>" . $no++ . "</td>
-                <td style='text-align:center;'>" . esc($p['nosis']) . "</td>
-                <td>" . esc($p['nama_siswa']) . "</td>
-                <td style='text-align:center;'>" . $nilai . "</td>
-                <td style='text-align:center;'>" . $status . "</td>
-            </tr>";
-        }
-
-        $html .= "</tbody></table></body></html>";
-
-        // Output ke PDF (sesuaikan dengan library PDF yang Anda pakai, contoh menggunakan Dompdf)
-        $dompdf = new \Dompdf\Dompdf();
-        $dompdf->loadHtml($html);
-        $dompdf->setPaper('A4', 'portrait');
-        $dompdf->render();
-        $dompdf->stream("Daftar_Nilai_" . url_title($ujian['nama_kelas'] ?? 'Ujian', '_', true) . ".pdf", ["Attachment" => 0]);
-        exit();
+    if (!$ujian) {
+        return redirect()->back()->with('error', 'Data ujian tidak ditemukan.');
     }
+
+    // ============================================================
+    // 2. DATA ANGKATAN
+    // ============================================================
+    $angkatan = $db->table('kelas_ujian_peserta cup')
+        ->select('a.nama_angkatan, a.tahun_angkatan')
+        ->join('siswa s', 's.id = cup.siswa_id', 'left')
+        ->join('angkatan a', 'a.id = s.angkatan_id', 'left')
+        ->where('cup.kelas_ujian_id', $kelasUjianId)
+        ->get()
+        ->getRowArray();
+
+    // ============================================================
+    // 3. DATA PESERTA
+    // ============================================================
+    $orderBy = ($sort === 'nilai')
+        ? 'nu.nilai_akhir DESC'
+        : 's.nosis ASC';
+
+    $peserta = $db->table('kelas_ujian_peserta cup')
+        ->select('
+            s.nama AS nama_siswa,
+            s.nosis,
+            nu.nilai_akhir
+        ')
+        ->join(
+            'siswa s',
+            's.id = cup.siswa_id',
+            'left'
+        )
+        ->join(
+            'nilai_ujian nu',
+            'nu.kelas_ujian_id = cup.kelas_ujian_id
+             AND nu.siswa_id = cup.siswa_id',
+            'left'
+        )
+        ->where('cup.kelas_ujian_id', $kelasUjianId)
+        ->orderBy($orderBy)
+        ->get()
+        ->getResultArray();
+
+    $jumlahPeserta = count($peserta);
+
+    // ============================================================
+    // 4. FORMAT TANGGAL
+    // ============================================================
+    $namaBulan = [
+        '01' => 'Januari',
+        '02' => 'Februari',
+        '03' => 'Maret',
+        '04' => 'April',
+        '05' => 'Mei',
+        '06' => 'Juni',
+        '07' => 'Juli',
+        '08' => 'Agustus',
+        '09' => 'September',
+        '10' => 'Oktober',
+        '11' => 'November',
+        '12' => 'Desember'
+    ];
+
+    $hariIndo = [
+        'Sun' => 'Minggu',
+        'Mon' => 'Senin',
+        'Tue' => 'Selasa',
+        'Wed' => 'Rabu',
+        'Thu' => 'Kamis',
+        'Fri' => 'Jumat',
+        'Sat' => 'Sabtu'
+    ];
+
+    $hariUjian = '-';
+    $tanggalUjian = '-';
+
+    if (!empty($ujian['tanggal'])) {
+
+        $timestamp = strtotime($ujian['tanggal']);
+
+        $hariUjian = $hariIndo[
+            date('D', $timestamp)
+        ] ?? '-';
+
+        $tanggalUjian =
+            date('d', $timestamp) . ' ' .
+            ($namaBulan[date('m', $timestamp)] ?? '') . ' ' .
+            date('Y', $timestamp);
+    }
+
+    $jamMulai = !empty($ujian['jam_mulai'])
+        ? date('H:i', strtotime($ujian['jam_mulai']))
+        : '-';
+
+    $jamSelesai = !empty($ujian['jam_selesai'])
+        ? date('H:i', strtotime($ujian['jam_selesai']))
+        : '-';
+
+    $waktuUjian =
+        "Pukul {$jamMulai} - {$jamSelesai} WIB";
+
+    $gadikPenguji = trim(
+        ($ujian['nama_pangkat'] ?? '') . ' ' .
+        ($ujian['nama_gadik'] ?? '-')
+    );
+
+    // ============================================================
+    // 5. HTML AWAL
+    // ============================================================
+    $html = '<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+
+<style>
+
+@page {
+    margin: 25px;
+}
+
+body {
+    font-family: DejaVu Sans, sans-serif;
+    font-size: 9px;
+}
+
+h2 {
+    text-align: center;
+    margin: 0 0 5px 0;
+}
+
+.subtitle {
+    text-align: center;
+    font-weight: bold;
+    margin-bottom: 15px;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+.info {
+    margin-bottom: 15px;
+}
+
+.info td {
+    border: none;
+    padding: 2px;
+    vertical-align: top;
+}
+
+.data {
+    width: 100%;
+    table-layout: fixed;
+}
+
+.data th,
+.data td {
+    border: 1px solid #000;
+    padding: 3px;
+}
+
+.data th {
+    background-color: #d9d9d9;
+    text-align: center;
+}
+
+.center {
+    text-align: center;
+}
+
+.page-break {
+    page-break-before: always;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<h2>REKAPITULASI NILAI UJIAN OBE</h2>
+
+<div class="subtitle">
+SISWA DIKTUK BINTARA POLWAN "' .
+        esc($angkatan['nama_angkatan'] ?? '-') .
+        '" TAHUN ANGKATAN ' .
+        esc($angkatan['tahun_angkatan'] ?? '-') .
+        '/' .
+        ((int)($angkatan['tahun_angkatan'] ?? 0) + 1) .
+'</div>
+
+<table class="info">
+
+<tr>
+
+<td width="45%">
+
+<b>Kelas Ujian</b> :
+' . esc($ujian['nama_kelas'] ?? '-') . '<br>
+
+<b>Mata Pelajaran</b> :
+' . esc($ujian['nama_mapel'] ?? '-') . '<br>
+
+<b>Jumlah Peserta</b> :
+' . $jumlahPeserta . ' Siswa
+
+</td>
+
+<td width="55%">
+
+<b>Hari</b> :
+' . esc($hariUjian) . '<br>
+
+<b>Tanggal</b> :
+' . esc($tanggalUjian) . '<br>
+
+<b>Waktu</b> :
+' . esc($waktuUjian) . '<br>
+
+<b>Gadik Penguji</b> :
+' . esc($gadikPenguji) . '
+
+</td>
+
+</tr>
+
+</table>
+';
+
+    // ============================================================
+    // 6. PECAH PESERTA MENJADI CHUNK
+    //
+    // Tetap satu HTML / satu PDF.
+    //
+    // 250 peserta per tabel.
+    // ============================================================
+
+    $chunkSize = 250;
+
+    $chunks = array_chunk(
+        $peserta,
+        $chunkSize
+    );
+
+    $no = 1;
+
+    foreach ($chunks as $chunkIndex => $chunk) {
+
+        // ========================================================
+        // PAGE BREAK ANTAR CHUNK
+        // ========================================================
+        if ($chunkIndex > 0) {
+
+            $html .= '
+            <div class="page-break"></div>
+            ';
+        }
+
+        // ========================================================
+        // TABEL CHUNK
+        // ========================================================
+        $html .= '
+        <table class="data">
+
+        <thead>
+
+        <tr>
+
+            <th width="5%">No</th>
+
+            <th width="15%">Nosis</th>
+
+            <th width="45%">Nama Siswa</th>
+
+            <th width="15%">Nilai Akhir</th>
+
+            <th width="20%">Status</th>
+
+        </tr>
+
+        </thead>
+
+        <tbody>
+        ';
+
+        // ========================================================
+        // DATA PESERTA
+        // ========================================================
+        foreach ($chunk as $p) {
+
+            $sudahDinilai =
+                $p['nilai_akhir'] !== null;
+
+            $status = $sudahDinilai
+                ? 'Sudah Dinilai'
+                : 'Belum Dinilai';
+
+            $nilai = $sudahDinilai
+                ? number_format(
+                    (float) $p['nilai_akhir'],
+                    2
+                )
+                : '-';
+
+            $html .= '
+            <tr>
+
+                <td class="center">
+                    ' . $no++ . '
+                </td>
+
+                <td class="center">
+                    ' . esc($p['nosis'] ?? '-') . '
+                </td>
+
+                <td>
+                    ' . esc($p['nama_siswa'] ?? '-') . '
+                </td>
+
+                <td class="center">
+                    ' . $nilai . '
+                </td>
+
+                <td class="center">
+                    ' . $status . '
+                </td>
+
+            </tr>
+            ';
+        }
+
+        $html .= '
+        </tbody>
+
+        </table>
+        ';
+    }
+
+    // ============================================================
+    // 7. HTML SELESAI
+    // ============================================================
+    $html .= '
+
+</body>
+</html>
+';
+
+    // ============================================================
+    // 8. DOMPDF OPTIONS
+    // ============================================================
+    $options = new \Dompdf\Options();
+
+    $options->set(
+        'isRemoteEnabled',
+        false
+    );
+
+    $options->set(
+        'isHtml5ParserEnabled',
+        true
+    );
+
+    $options->set(
+        'defaultFont',
+        'DejaVu Sans'
+    );
+
+    // ============================================================
+    // 9. GENERATE PDF
+    // ============================================================
+    $dompdf = new \Dompdf\Dompdf(
+        $options
+    );
+
+    $dompdf->loadHtml(
+        $html,
+        'UTF-8'
+    );
+
+    $dompdf->setPaper(
+        'A4',
+        'portrait'
+    );
+
+    $dompdf->render();
+
+    // ============================================================
+    // 10. DOWNLOAD / STREAM
+    // ============================================================
+    $filename =
+        'Daftar_Nilai_' .
+        url_title(
+            $ujian['nama_kelas'] ?? 'Ujian',
+            '_',
+            true
+        ) .
+        '.pdf';
+
+    $dompdf->stream(
+        $filename,
+        [
+            'Attachment' => false
+        ]
+    );
+
+    exit;
+}
+    
 }

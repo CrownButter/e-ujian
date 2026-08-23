@@ -1,6 +1,32 @@
 <?= $this->extend('layout/main'); ?>
 <?= $this->section('content'); ?>
-
+<!-- <div class="card">
+    <div class="card-header">Profil Pengguna</div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-4 text-center">
+                <img src="<?= base_url('assets/img/user-default.png') ?>" class="img-circle" width="150">
+            </div>
+            <div class="col-md-8">
+                <table class="table table-borderless">
+                    <tr>
+                        <th>Nama Lengkap</th>
+                        <td>: <?= $user['nama'] ?></td>
+                    </tr>
+                    <tr>
+                        <th>Nomor Induk</th>
+                        <td>: <?= isset($user['nosis']) ? $user['nosis'] : $user['nomor_induk'] ?></td>
+                    </tr>
+                    <tr>
+                        <th>Username</th>
+                        <td>: <?= session()->get('username') ?></td>
+                    </tr>
+                </table>
+                <a href="<?= base_url('admin/users/ubah-password') ?>" class="btn btn-primary">Ubah Password</a>
+            </div>
+        </div>
+    </div>
+</div> -->
 
 <div class="content-wrapper">
     <!-- Content Header (Page header) -->
@@ -66,24 +92,12 @@
                                 <!-- Ttd & Data Utama di dalam tabel -->
                                 <table class="table table-borderless mb-4">
                                     <tbody class="bg-light">
-                                        <!-- Tambahan Baris Pangkat Khusus Pegawai -->
-                                        <?php if (session()->get('role_id') != 7): ?>
-                                            <tr>
-                                                <td style="width: 20%;" class="font-weight-bold text-muted">Pangkat</td>
-                                                <td>:</td>
-                                                <td>
-                                                    <?= esc($user['nama_pangkat'] ?? '-') ?>
-                                                    <input type="hidden" name="pangkat_id" value="<?= $user['pangkat_id'] ?? '' ?>">
-                                                </td>
-                                            </tr>
-                                        <?php endif; ?>
-
                                         <tr>
                                             <td style="width: 20%;" class="font-weight-bold text-muted">Nama</td>
                                             <td>:</td>
                                             <td>
-                                                <?= esc($user['nama'] ?? '-') ?>
-                                                <input type="hidden" name="nama" value="<?= $user['nama'] ?? '' ?>">
+                                                <?= esc($user['nama']) ?>
+                                                <input type="hidden" name="nama" value="<?= $user['nama'] ?>">
                                             </td>
                                         </tr>
                                         <tr>
@@ -96,6 +110,19 @@
                                                 <input type="hidden" name="identitas" value="<?= (session()->get('role_id') == 7) ? ($user['nosis'] ?? '') : ($user['nomor_induk'] ?? '') ?>">
                                             </td>
                                         </tr>
+                                        <!-- JIKA PEGAWAI: Tampilkan baris TTD Digital -->
+                                        <?php if (session()->get('role_id') != 7): ?>
+                                            <tr>
+                                                <td class="font-weight-bold text-muted">Tanda Tangan Digital</td>
+                                                <td>
+                                                    <?php if (!empty($user['ttd'])): ?>
+                                                        <img src="<?= base_url('assets/dist/img/ttd/' . $user['ttd']) ?>" alt="TTD Pegawai" style="max-height: 70px; border: 1px dashed #ccc; padding: 4px;">
+                                                    <?php else: ?>
+                                                        <span class="text-danger small"><i class="fas fa-exclamation-triangle"></i> TTD Belum Diunggah</span>
+                                                    <?php endif; ?>
+                                                </td>
+                                            </tr>
+                                        <?php endif; ?>
                                     </tbody>
                                 </table>
 
@@ -135,9 +162,9 @@
 
                                         <!-- KONDISI 2: JIKA USER ADALAH PEGAWAI (Danton/Danki/Danyon/Pengasuh) -->
                                     <?php else: ?>
-                                        <div class="card-header bg-success">
-                                            <h3 class="card-title text-white"> <i class="fas fa-briefcase mr-2"></i> Data Kelompok & Penugasan Struktural</h3>
-                                        </div>
+                                        <h5 class="text-success mb-3 mt-4">
+                                            <i class="fas fa-briefcase mr-2"></i> Data Kelompok & Penugasan Struktural
+                                        </h5>
 
                                         <table class="table table-bordered table-striped custom-profile-table">
                                             <thead>
@@ -177,7 +204,7 @@
                                                         <?php if (session()->get('role_id') == 4): ?>
                                                             <span class="badge badge-success p-2"><i class="fas fa-user-shield"></i> DANTON</span>
                                                         <?php elseif (session()->get('role_id') == 3): ?>
-                                                            <span class="badge badge-warning p-2"><i class="fas fa-user-check"></i> GADIK</span>
+                                                            <span class="badge badge-warning p-2"><i class="fas fa-user-check"></i> PENGASUH</span>
                                                         <?php else: ?>
                                                             <span class="text-muted small">-</span>
                                                         <?php endif; ?>
@@ -199,7 +226,7 @@
 
     <?php
     // Tentukan daftar role untuk mengambil prefix
-    $roles = [1 => 'admin', 2 => 'operator', 3 => 'gadik', 4 => 'danton', 5 => 'danki', 6 => 'danyon', 7 => 'siswa'];
+    $roles = [1 => 'admin', 2 => 'operator', 3 => 'pengasuh', 4 => 'danton', 5 => 'danki', 6 => 'danyon', 7 => 'siswa'];
     $roleId = session()->get('role_id');
     $prefix = isset($roles[$roleId]) ? $roles[$roleId] : 'user';
     ?>
@@ -243,13 +270,13 @@
                             <small class="text-muted">Format: jpg, jpeg, png. Max: 2MB</small>
                         </div>
                         <!-- Masukkan ini di dalam modal-body file view Anda -->
-                        <!-- <?php if (session()->get('role_id') != 7): ?>
+                        <?php if (session()->get('role_id') != 7): ?>
                             <div class="form-group">
                                 <label>Tanda Tangan</label>
                                 <input type="file" name="ttd" class="form-control">
                                 <small class="text-muted">Format: jpg, jpeg, png. Max: 2MB (Khusus Danton/Danki/Danyon)</small>
                             </div>
-                        <?php endif; ?> -->
+                        <?php endif; ?>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" data-dismiss="modal">Batal</button>
