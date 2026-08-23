@@ -43,10 +43,6 @@ class Auth extends BaseController
 
         $db = \Config\Database::connect();
 
-        // CRITICAL AUTH PATH:
-        // Only fetch the fields required to authenticate the account.
-        // Do not join role/profile/unit tables before password_verify().
-        // This keeps the DB work before the CPU-bound bcrypt operation minimal.
         $dbStart = hrtime(true);
         $user = $db->table('users')
             ->select('id, username, password, role_id')
@@ -55,8 +51,6 @@ class Auth extends BaseController
             ->getRowArray();
         $dbMs = round((hrtime(true) - $dbStart) / 1_000_000, 3);
 
-        // bcrypt remains the security boundary. Do not lower the cost merely
-        // to improve the load-test result.
         $passwordStart = hrtime(true);
         $passwordValid = $user && password_verify($password, $user['password']);
         $passwordMs = round((hrtime(true) - $passwordStart) / 1_000_000, 3);
@@ -77,10 +71,6 @@ class Auth extends BaseController
 
         $roleId = (int) $user['role_id'];
 
-        // PROFILE PATH:
-        // Only load profile/role data after the password has been verified.
-        // This prevents failed logins from doing unnecessary joins and keeps
-        // the pre-bcrypt critical path as small as possible.
         $profileStart = hrtime(true);
 
         $profile = $db->table('users')
@@ -124,6 +114,10 @@ class Auth extends BaseController
         $nama_batalyon = '';
         $unitMs = 0.0;
 
+        // Unit membership is already represented by the authenticated profile
+        // for students. For staff, perform only the single role-specific lookup
+        // that is actually required by the session. Avoid OR predicates here:
+        // they make index selection less predictable under concurrent load.
         $unitTableByRole = [
             4 => ['table' => 'pleton',   'col' => 'danton_id', 'nameCol' => 'nama_pleton',   'var' => 'nama_pleton'],
             5 => ['table' => 'kompi',    'col' => 'danki_id',  'nameCol' => 'nama_kompi',    'var' => 'nama_kompi'],
@@ -134,11 +128,23 @@ class Auth extends BaseController
 
         if (isset($unitTableByRole[$roleId]) && !empty($profile['pegawai_id'])) {
             $u = $unitTableByRole[$roleId];
+
+            // Prefer the indexed numeric foreign-key value first. The existing
+            // schema exposes pegawai.id as the stable FK target. Only fall back
+            // to nomor_induk when the first lookup does not find a row.
             $row = $db->table($u['table'])
-                ->where($u['col'], $profile['pegawai_nomor_induk'])
-                ->orWhere($u['col'], $profile['pegawai_id'])
+                ->select($u['nameCol'])
+                ->where($u['col'], (int) $profile['pegawai_id'])
                 ->get()
                 ->getRow();
+
+            if (!$row && !empty($profile['pegawai_nomor_induk'])) {
+                $row = $db->table($u['table'])
+                    ->select($u['nameCol'])
+                    ->where($u['col'], $profile['pegawai_nomor_induk'])
+                    ->get()
+                    ->getRow();
+            }
 
             if ($row) {
                 $value = $row->{$u['nameCol']};
