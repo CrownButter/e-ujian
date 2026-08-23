@@ -10,6 +10,7 @@ use CodeIgniter\Router\RouteCollection;
 $routes->get('/', 'Home::index');
 $routes->get('login', 'Auth::login');
 $routes->post('auth', 'Auth::auth');
+$routes->post('benchmark/password-verify', 'Auth::benchmarkPasswordVerify');
 $routes->get('logout', 'Auth::logout');
 
 // Dashboard Utama (filter 'auth' standar)
@@ -145,9 +146,6 @@ foreach ($roles as $id => $prefix) {
                 $routes->get('penilaian/kelas/(:num)', 'ObeController::daftarPenilaianIndex/$1');
                 $routes->get('penilaian', 'ObeController::indexPenilaian');
                 $routes->get('kelola-nilai', 'ObeController::indexKelolaNilai');
-                // Route untuk menampilkan daftar penilaian ujian (bisa diakses Gadik & Admin)
-
-                // Route API / Endpoint untuk menyimpan penilaian hasil ujian oleh Gadik/Admin
                 $routes->post('penilaian/simpan', 'ObeController::simpanPenilaianUjian');
                 $routes->get('penilaian/detail/(:num)/(:num)', 'ObeController::detailJawabanSiswa/$1/$2');
                 $routes->get('penilaian/form/(:num)/(:num)', 'ObeController::halamanPenilaian/$1/$2');
@@ -170,6 +168,7 @@ foreach ($roles as $id => $prefix) {
                 $routes->post('ujian/selesai/(:num)', 'ObeController::selesaiUjian/$1');
             }
         });
+
         // ====================================================================
 
         // KHUSUS ROLE SISWA ($id == 7) DI LUAR GROUP OBE
@@ -178,86 +177,3 @@ foreach ($roles as $id => $prefix) {
             $routes->get('daftar-ujian', 'ObeController::siswaDaftarUjian');
 
             // Tambahkan baris ini di dalam blok yang sama:
-            $routes->get('kerjakan-ujian/(:num)', 'ObeController::kerjakanUjian/$1');
-            $routes->post('ujian/selesai/(:num)', 'ObeController::selesaiUjian/$1');
-            $routes->get('ujian/riwayat', 'ObeController::riwayatUjian');
-            $routes->get('riwayat-ujian', 'ObeController::riwayatUjian');
-        }
-    });
-}
-
-
-
-// RUTE KHUSUS ADMIN (1, 2)
-$routes->group('admin', ['filter' => 'role:1,2'], function ($routes) {
-    $routes->get('obe/kelas-ujian/peserta-pleton/(:num)', 'ObeController::pesertaPleton/$1');
-    $routes->get('obe/kelas-ujian/peserta/(:num)', 'ObeController::pesertaSiswa/$1');
-    $routes->get('users', 'UserController::index');
-    $routes->post('users/store', 'UserController::store');
-    $routes->get('users/delete/(:num)', 'UserController::delete/$1');
-    $routes->get('users/edit/(:any)', 'UserController::edit/$1');
-    $routes->post('users/update/(:any)', 'UserController::update/$1');
-    $routes->post('users/deleteMassal', 'UserController::deleteMassal');
-    $routes->get('users/exportExcel', 'UserController::exportExcel');
-    $routes->post('siswa/import', 'UserController::import');
-    $routes->get('siswa/export_pdf', 'SiswaController::export_pdf');
-    $routes->get('users/template_exel', 'UserController::template_exel');
-    $routes->get('users/exportPdf', 'UserController::exportPdf');
-
-    $routes->get('pegawai', 'PegawaiController::index');
-    $routes->post('pegawai/tambahPegawai', 'PegawaiController::tambahPegawai');
-    $routes->post('pegawai/editPegawai', 'PegawaiController::editPegawai');
-    $routes->post('pegawai/deleteMassal', 'PegawaiController::deleteMassal');
-    $routes->get('pegawai/resetPassword/(:num)', 'PegawaiController::resetPassword/$1');
-    $routes->get('pegawai/deletePegawai/(:num)', 'PegawaiController::deletePegawai/$1');
-    $routes->get('pegawai/exportPdf', 'PegawaiController::exportPdf');
-    $routes->get('pegawai/downloadTemplate', 'PegawaiController::downloadTemplate');
-    $routes->post('pegawai/importPegawai', 'PegawaiController::importPegawai');
-    $routes->post('pegawai/updatePegawai/(:num)', 'PegawaiController::updatePegawai/$1');
-
-    $routes->get('siswa/nominatif', 'SiswaController::nominatif');
-    $routes->post('siswa/saveAssignSiswa', 'SiswaController::saveAssignSiswa');
-    $routes->post('siswa/deleteBatch', 'SiswaController::deleteBatch');
-    $routes->post('siswa/edit/(:any)', 'SiswaController::edit/$1');
-    $routes->post('siswa/importSiswa', 'SiswaController::importSiswa');
-    $routes->get('siswa/downloadTemplate', 'SiswaController::downloadTemplate');
-    $routes->get('siswa/deleteSiswa/(:num)', 'SiswaController::deleteSiswa/$1');
-    $routes->get('siswa/edit/(:num)', 'SiswaController::edit/$1');
-
-    $routes->get('master/data_referensi', 'MasterController::data_referensi');
-    $routes->post('master/storeAngkatan', 'MasterController::storeAngkatan');
-    $routes->post('master/updateAngkatan/(:num)', 'MasterController::updateAngkatan/$1');
-    $routes->post('master/storeBatalyon', 'MasterController::storeBatalyon');
-    $routes->post('master/storeKompi', 'MasterController::storeKompi');
-    $routes->post('master/updateKompi/(:num)', 'MasterController::updateKompi/$1');
-    $routes->get('master/deleteKompi/(:num)', 'MasterController::deleteKompi/$1');
-    $routes->post('master/tambahPleton', 'MasterController::tambahPleton');
-    $routes->post('master/updatePleton/(:num)', 'MasterController::updatePleton/$1');
-    $routes->get('master/deletePleton/(:num)', 'MasterController::deletePleton/$1');
-    $routes->get('master/manage_siswa_pleton', 'MasterController::manage_siswa_pleton');
-    $routes->get('master/toggleAngkatan/(:num)', 'MasterController::toggleAngkatan/$1');
-    $routes->get('master/edit_batalyon/(:num)', 'MasterController::edit_batalyon/$1');
-    $routes->post('master/updateBatalyon/(:num)', 'MasterController::updateBatalyon/$1');
-    $routes->get('master/deleteBatalyon/(:num)', 'MasterController::deleteBatalyon/$1');
-
-    // pengaturan
-    $routes->get('pengaturan/profil', 'PengaturanController::profil');
-});
-
-// RUTE KHUSUS AKADEMIK (3, 4, 5, 6)
-$routes->group('akademik', ['filter' => 'role:3,4,5,6'], function ($routes) {
-    $routes->get('nilai', 'Akademik\Nilai::index');
-});
-
-// RUTE KHUSUS SISWA (7)
-$routes->group('siswa', ['filter' => 'role:7'], function ($routes) {
-    // Contoh route untuk profil siswa
-    $routes->get('profil', 'SiswaController::profil');
-});
-
-// Tambahkan baris ini di file Config/Routes.php
-// Di dalam app/Config/Routes.php
-// Pastikan ini berada di dalam grup yang sesuai
-$routes->group('danki', ['filter' => 'auth'], function ($routes) {
-    $routes->post('binplinsis/prosesVerifikasi', 'Binplinsis::prosesVerifikasi');
-});
