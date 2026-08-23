@@ -7,8 +7,8 @@ const LOGIN_PATH = '/login';
 const AUTH_PATH = '/auth';
 const SUCCESS_PATH = '/siswa/users/profil';
 
-// VUS controls how many accounts are tested concurrently.
-// Example: VUS=1 => account 001, VUS=10 => 001-010, VUS=709 => 001-709.
+// One deterministic login per VU.
+// VU 1 -> account 001, VU 2 -> account 002, ..., VU 709 -> account 709.
 const VUS = parsePositiveInt(__ENV.VUS, 709);
 const ITERATIONS = parsePositiveInt(__ENV.ITERATIONS, VUS);
 const MAX_ACCOUNT = 709;
@@ -17,8 +17,10 @@ if (VUS > MAX_ACCOUNT) {
   throw new Error(`VUS cannot exceed ${MAX_ACCOUNT}. Received: ${VUS}`);
 }
 
-if (ITERATIONS < VUS) {
-  throw new Error(`ITERATIONS must be >= VUS so every VU can receive a unique account. Received VUS=${VUS}, ITERATIONS=${ITERATIONS}`);
+// The monitoring wrapper keeps ITERATIONS equal to VUS for backwards compatibility.
+// The actual executor is per-vu-iterations with exactly one login per VU.
+if (ITERATIONS !== VUS) {
+  throw new Error(`For deterministic one-login-per-VU testing, ITERATIONS must equal VUS. Received VUS=${VUS}, ITERATIONS=${ITERATIONS}`);
 }
 
 function parsePositiveInt(value, fallback) {
@@ -31,17 +33,20 @@ function parsePositiveInt(value, fallback) {
 }
 
 const loginAttempts = new Counter('login_attempts');
-const loginSuccess = new Counter('login_success');
-const loginFailure = new Counter('login_failure');
+const csrfSuccess = new Counter('csrf_success');
+const csrfFailure = new Counter('csrf_failure');
+const authAttempts = new Counter('auth_attempts');
+const authSuccess = new Counter('auth_success');
+const authFailure = new Counter('auth_failure');
 const loginSuccessRate = new Rate('login_success_rate');
 const loginDuration = new Trend('login_duration', true);
 
 export const options = {
   scenarios: {
     concurrent_logins: {
-      executor: 'shared-iterations',
+      executor: 'per-vu-iterations',
       vus: VUS,
-      iterations: ITERATIONS,
+      iterations: 1,
       maxDuration: '10m',
     },
   },
@@ -60,7 +65,6 @@ function extractCsrf(html) {
 }
 
 function accountForVU() {
-  // __VU is 1-based. With VUS=N, VU N uses account N.
   const number = __VU;
   if (number < 1 || number > VUS || number > MAX_ACCOUNT) {
     throw new Error(`Unexpected VU number: ${number}`);
@@ -80,17 +84,20 @@ export default function () {
   });
 
   const csrf = extractCsrf(loginPage.body || '');
-  const csrfFound = check(loginPage, {
+  const pageOk = check(loginPage, {
     'login page status is 200': (r) => r.status === 200,
     'CSRF token exists': () => csrf !== null && csrf.value.length > 0,
   });
 
-  if (!csrfFound || !csrf) {
-    loginFailure.add(1);
+  if (!pageOk || !csrf) {
+    csrfFailure.add(1);
     loginSuccessRate.add(false);
     loginDuration.add(Date.now() - startedAt);
     return;
   }
+
+  csrfSuccess.add(1);
+  authAttempts.add(1);
 
   const payload = { username, password, [csrf.name]: csrf.value };
 
@@ -109,19 +116,24 @@ export default function () {
   loginSuccessRate.add(success);
 
   if (success) {
-    loginSuccess.add(1);
+    authSuccess.add(1);
   } else {
-    loginFailure.add(1);
-    console.error(`[LOGIN FAILED] username=${username} status=${authResponse.status} location=${location || '<none>'}`);
+    authFailure.add(1);
+    console.error(`[AUTH FAILED] username=${username} status=${authResponse.status} location=${location || '<none>'}`);
   }
 }
 
 export function handleSummary(data) {
   const metrics = data.metrics || {};
-  const attempts = metrics.login_attempts?.values?.count || 0;
-  const success = metrics.login_success?.values?.count || 0;
-  const failure = metrics.login_failure?.values?.count || 0;
-  const successRate = metrics.login_success_rate?.values?.rate || 0;
+  const count = (name) => metrics[name]?.values?.count || 0;
+  const rate = metrics.login_success_rate?.values?.rate || 0;
+
+  const attempts = count('login_attempts');
+  const csrfOk = count('csrf_success');
+  const csrfBad = count('csrf_failure');
+  const authTry = count('auth_attempts');
+  const success = count('auth_success');
+  const failure = count('auth_failure');
 
   const report = {
     test: {
@@ -129,20 +141,30 @@ export function handleSummary(data) {
       base_url: BASE_URL,
       accounts: `001-${String(VUS).padStart(3, '0')}`,
       vus: VUS,
-      iterations: ITERATIONS,
+      iterations: VUS,
+      iterations_per_vu: 1,
+      executor: 'per-vu-iterations',
       generated_at: new Date().toISOString(),
     },
+    requests: {
+      expected_get_login: attempts,
+      expected_post_auth: authTry,
+      expected_total_http_requests: attempts + authTry,
+    },
     result: {
-      attempts,
-      success,
-      failure,
-      success_rate: successRate,
+      login_attempts: attempts,
+      csrf_success: csrfOk,
+      csrf_failure: csrfBad,
+      auth_attempts: authTry,
+      auth_success: success,
+      auth_failure: failure,
+      login_success_rate: rate,
     },
     metrics: data.metrics,
   };
 
   return {
-    stdout: `\nE-UJIAN K6 LOGIN TEST\n=====================\nBASE_URL       : ${BASE_URL}\nACCOUNTS       : 001-${String(VUS).padStart(3, '0')}\nVUS            : ${VUS}\nITERATIONS     : ${ITERATIONS}\nTOTAL ATTEMPTS : ${attempts}\nSUCCESS        : ${success}\nFAILURE        : ${failure}\nSUCCESS RATE   : ${(successRate * 100).toFixed(2)}%\n`,
+    stdout: `\nE-UJIAN K6 LOGIN TEST\n=====================\nBASE_URL          : ${BASE_URL}\nACCOUNTS          : 001-${String(VUS).padStart(3, '0')}\nVUS               : ${VUS}\nITERATIONS        : ${VUS} (1 per VU)\nGET /login        : ${attempts}\nCSRF SUCCESS      : ${csrfOk}\nCSRF FAILURE      : ${csrfBad}\nPOST /auth        : ${authTry}\nAUTH SUCCESS      : ${success}\nAUTH FAILURE      : ${failure}\nEXPECTED HTTP REQ : ${attempts + authTry}\nSUCCESS RATE      : ${(rate * 100).toFixed(2)}%\n`,
     [__ENV.K6_SUMMARY_FILE || 'summary.json']: JSON.stringify(report, null, 2),
   };
 }
