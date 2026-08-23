@@ -7,6 +7,7 @@ use App\Models\UserModel;
 class Auth extends BaseController
 {
     protected $helpers = ['url', 'form'];
+
     public function login()
     {
         session();
@@ -16,25 +17,6 @@ class Auth extends BaseController
         ];
         return view('auth/login', $data);
     }
-
-    private function getNamaLengkap($userId, $roleId)
-    {
-        $db = \Config\Database::connect();
-
-        if ($roleId == 7) {
-            $table = 'siswa';
-        } else {
-            // Untuk role 1-6, kita arahkan ke tabel pegawai
-            $table = 'pegawai';
-        }
-
-        // Ambil data berdasarkan tabel dan pastikan mencocokkan user_id secara spesifik
-        $data = $db->table($table)->where('user_id', $userId)->get()->getRow();
-
-        // Jika data tidak ditemukan, gunakan default 'User'
-        return $data ? $data->nama : 'User';
-    }
-
 
     public function auth()
     {
@@ -55,96 +37,95 @@ class Auth extends BaseController
             return redirect()->to('login')->withInput();
         }
 
-        $model    = new UserModel();
         $username = $this->request->getPost('username');
         $password = $this->request->getPost('password');
 
-        $data = $model->where('username', $username)->first();
+        $db = \Config\Database::connect();
 
-        if ($data && password_verify($password, $data['password'])) {
+        // 1 QUERY GABUNGAN: user + role + profil pegawai/siswa sekaligus.
+        // Sebelumnya ini 3-5 query terpisah (UserModel, RoleModel, pegawai/siswa,
+        // lalu getNamaLengkap() query ulang tabel yang sama).
+        $data = $db->table('users')
+            ->select('
+                users.id, users.username, users.password, users.role_id,
+                roles.nama_role,
+                pegawai.id as pegawai_id, pegawai.nama as nama_pegawai, pegawai.nomor_induk as pegawai_nomor_induk,
+                siswa.nama as nama_siswa, siswa.pleton_id as siswa_pleton_id
+            ')
+            ->join('roles', 'roles.id = users.role_id', 'left')
+            ->join('pegawai', 'pegawai.user_id = users.id', 'left')
+            ->join('siswa', 'siswa.user_id = users.id', 'left')
+            ->where('users.username', $username)
+            ->get()
+            ->getRowArray();
 
-            // 1. Ambil Nama Role
-            $roleModel = new \App\Models\RoleModel();
-            $roleData  = $roleModel->find($data['role_id']);
-            $namaRole = $roleData ? $roleData['nama_role'] : 'User';
+        // password_verify dulu (CPU-bound, gak butuh DB), baru cek data user.
+        // Urutan gak masalah untuk timing attack di sini karena tetap constant-ish,
+        // tapi cek $data dulu untuk hindari null-password error.
+        if (!$data || !password_verify($password, $data['password'])) {
+            session()->setFlashdata('msg', 'Username atau Password salah');
+            return redirect()->to('/login');
+        }
 
-            // 2. Logika Tambahan untuk Danton, Danki, dan Danyon
-            $nama_pleton = '';
-            $nama_kompi = '';
-            $nama_batalyon = '';
-            $db = \Config\Database::connect();
+        $namaRole = $data['nama_role'] ?? 'User';
+        $nama = ($data['role_id'] == 7)
+            ? ($data['nama_siswa'] ?? 'User')
+            : ($data['nama_pegawai'] ?? 'User');
 
-            // Jika Danton (role_id 4)
-            if ($data['role_id'] == 4) {
-                $pegawai = $db->table('pegawai')->where('user_id', $data['id'])->get()->getRow();
-                if ($pegawai) {
-                    $pleton = $db->table('pleton')->where('danton_id', $pegawai->nomor_induk)->orWhere('danton_id', $pegawai->id)->get()->getRow();
-                    if ($pleton) {
-                        $nama_pleton = ' - ' . $pleton->nama_pleton;
-                        // Simpan ke session juga jika diperlukan
-                        session()->set('nama_pleton', $pleton->nama_pleton);
-                    }
-                }
+        $nama_pleton = '';
+        $nama_kompi = '';
+        $nama_batalyon = '';
+
+        // Query kedua (opsional) HANYA untuk role yang butuh data unit,
+        // dan hanya 1 query (bukan 2 seperti sebelumnya: pegawai lookup + unit lookup).
+        $unitTableByRole = [
+            4 => ['table' => 'pleton',    'col' => 'danton_id', 'nameCol' => 'nama_pleton',   'var' => 'nama_pleton'],
+            5 => ['table' => 'kompi',     'col' => 'danki_id',  'nameCol' => 'nama_kompi',    'var' => 'nama_kompi'],
+            6 => ['table' => 'batalyon',  'col' => 'danyon_id', 'nameCol' => 'nama_batalyon', 'var' => 'nama_batalyon'],
+        ];
+
+        if (isset($unitTableByRole[$data['role_id']]) && $data['pegawai_id']) {
+            $u = $unitTableByRole[$data['role_id']];
+            $row = $db->table($u['table'])
+                ->where($u['col'], $data['pegawai_nomor_induk'])
+                ->orWhere($u['col'], $data['pegawai_id'])
+                ->get()
+                ->getRow();
+
+            if ($row) {
+                $value = ' - ' . $row->{$u['nameCol']};
+                if ($u['var'] === 'nama_pleton') $nama_pleton = $value;
+                if ($u['var'] === 'nama_kompi') $nama_kompi = $value;
+                if ($u['var'] === 'nama_batalyon') $nama_batalyon = $value;
+                session()->set($u['var'], $row->{$u['nameCol']});
             }
-            // Jika Danki (role_id 5)
-            elseif ($data['role_id'] == 5) {
-                $pegawai = $db->table('pegawai')->where('user_id', $data['id'])->get()->getRow();
-                if ($pegawai) {
-                    $kompi = $db->table('kompi')->where('danki_id', $pegawai->nomor_induk)->orWhere('danki_id', $pegawai->id)->get()->getRow();
-                    if ($kompi) {
-                        $nama_kompi = ' - ' . $kompi->nama_kompi;
-                        session()->set('nama_kompi', $kompi->nama_kompi);
-                    }
-                }
-            }
-            // Jika Danyon (role_id 6)
-            elseif ($data['role_id'] == 6) {
-                $pegawai = $db->table('pegawai')->where('user_id', $data['id'])->get()->getRow();
-                if ($pegawai) {
-                    $batalyon = $db->table('batalyon')->where('danyon_id', $pegawai->nomor_induk)->orWhere('danyon_id', $pegawai->id)->get()->getRow();
-                    if ($batalyon) {
-                        $nama_batalyon = ' - ' . $batalyon->nama_batalyon;
-                        session()->set('nama_batalyon', $batalyon->nama_batalyon);
-                    }
-                }
-            }
-            // Jika Siswa (role_id 7) -> TAMBAHAN DI SINI
-            elseif ($data['role_id'] == 7) {
-                $siswa = $db->table('siswa')->where('user_id', $data['id'])->get()->getRow();
-                if ($siswa && $siswa->pleton_id) {
-                    $pleton = $db->table('pleton')->where('id', $siswa->pleton_id)->get()->getRow();
-                    if ($pleton) {
-                        $nama_pleton = ' - ' . $pleton->nama_pleton;
-                        session()->set('nama_pleton', $pleton->nama_pleton);
-                    }
-                }
-            }
-
-            // 3. Set session dengan data yang lengkap
-            session()->set([
-                'user_id'       => $data['id'],
-                'username'      => $data['username'],
-                'role_id'       => $data['role_id'],
-                'nama_role'     => $namaRole,
-                'nama_pleton'   => $nama_pleton,
-                'nama_kompi'    => $nama_kompi,     // Disimpan untuk Danki
-                'nama_batalyon' => $nama_batalyon, // Disimpan untuk Danyon
-                'nama'          => $this->getNamaLengkap($data['id'], $data['role_id']),
-                'logged_in'     => true
-            ]);
-
-            // Logika Pengalihan Berdasarkan Role
-            if ($data['role_id'] == 7) {
-                return redirect()->to('/siswa/users/profil');
-            } else {
-                return redirect()->to('/dashboard');
+        } elseif ($data['role_id'] == 7 && $data['siswa_pleton_id']) {
+            // pleton_id sudah didapat dari query gabungan di atas, tinggal 1 query lookup nama pleton
+            $pleton = $db->table('pleton')->where('id', $data['siswa_pleton_id'])->get()->getRow();
+            if ($pleton) {
+                $nama_pleton = ' - ' . $pleton->nama_pleton;
+                session()->set('nama_pleton', $pleton->nama_pleton);
             }
         }
 
-        // 4. Jika login gagal
-        session()->setFlashdata('msg', 'Username atau Password salah');
-        return redirect()->to('/login');
+        session()->set([
+            'user_id'       => $data['id'],
+            'username'      => $data['username'],
+            'role_id'       => $data['role_id'],
+            'nama_role'     => $namaRole,
+            'nama_pleton'   => $nama_pleton,
+            'nama_kompi'    => $nama_kompi,
+            'nama_batalyon' => $nama_batalyon,
+            'nama'          => $nama,
+            'logged_in'     => true
+        ]);
+
+        if ($data['role_id'] == 7) {
+            return redirect()->to('/siswa/users/profil');
+        }
+        return redirect()->to('/dashboard');
     }
+
     public function logout()
     {
         session()->destroy();
