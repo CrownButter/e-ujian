@@ -1,0 +1,88 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Active VUs",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "k6_vus", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "title": "Login Success Rate",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "100 * k6_login_success_rate", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 2}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "title": "Login Requests",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "sum(k6_http_reqs)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "title": "Container Memory",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "sum(container_memory_working_set_bytes{name=~\"e-ujian-.*\"})", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "bytes", "decimals": 1}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Login Latency",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [
+        {"expr": "k6_login_duration{quantile=\"p(95)\"}", "legendFormat": "p95", "refId": "A"},
+        {"expr": "k6_login_duration{quantile=\"p(99)\"}", "legendFormat": "p99", "refId": "B"},
+        {"expr": "k6_login_duration{quantile=\"avg\"}", "legendFormat": "avg", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP Request Rate",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [{"expr": "sum(rate(k6_http_reqs[10s]))", "legendFormat": "requests/sec", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Docker CPU Usage by Container",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "targets": [{"expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"e-ujian-.*\"}[10s])) * 100", "legendFormat": "{{name}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Docker Memory by Container",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "targets": [{"expr": "container_memory_working_set_bytes{name=~\"e-ujian-.*\"}", "legendFormat": "{{name}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "bytes", "decimals": 1}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Docker Network Receive",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "targets": [{"expr": "sum by (name) (rate(container_network_receive_bytes_total{name=~\"e-ujian-.*\"}[10s]))", "legendFormat": "{{name}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Docker Network Transmit",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "targets": [{"expr": "sum by (name) (rate(container_network_transmit_bytes_total{name=~\"e-ujian-.*\"}[10s]))", "legendFormat": "{{name}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []}
+    }
+  ],
+  "schemaVersion": 41,
+  "tags": ["e-ujian", "k6", "docker", "load-test"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timezone": "browser",
+  "title": "E-UJIAN Load Test",
+  "uid": "e-ujian-load-test"
+}
