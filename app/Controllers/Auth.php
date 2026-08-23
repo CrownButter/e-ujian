@@ -126,6 +126,37 @@ class Auth extends BaseController
         return redirect()->to('/dashboard');
     }
 
+    /**
+     * Development-only benchmark endpoint for isolating password_verify().
+     * Never expose this endpoint in production.
+     */
+    public function benchmarkPasswordVerify()
+    {
+        if (ENVIRONMENT !== 'development') {
+            return $this->response->setStatusCode(404)->setJSON([
+                'error' => 'Not available'
+            ]);
+        }
+
+        $password = $this->request->getPost('password');
+        $hash = $this->request->getPost('hash');
+
+        if (!$password || !$hash) {
+            return $this->response->setStatusCode(400)->setJSON([
+                'error' => 'password and hash are required'
+            ]);
+        }
+
+        $start = hrtime(true);
+        $valid = password_verify($password, $hash);
+        $durationMs = (hrtime(true) - $start) / 1_000_000;
+
+        return $this->response->setJSON([
+            'valid' => $valid,
+            'duration_ms' => round($durationMs, 3),
+        ]);
+    }
+
     public function logout()
     {
         session()->destroy();
