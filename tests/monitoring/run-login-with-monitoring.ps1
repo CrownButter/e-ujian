@@ -23,6 +23,7 @@ $reportDir = Join-Path $reportRoot "${timestamp}_${vus}vu"
 $dockerCsv = Join-Path $reportDir 'docker-stats.csv'
 $summaryFile = Join-Path $reportDir 'summary.json'
 $runMetadata = Join-Path $reportDir 'run.json'
+$peakFile = Join-Path $reportDir 'peak-resources.json'
 $summaryHtml = Join-Path $reportDir 'summary.html'
 
 New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
@@ -39,7 +40,6 @@ Write-Host "Accounts   : 001-$('{0:D3}' -f $vus)"
 Write-Host "Report     : $reportDir"
 Write-Host ''
 
-# Verify application before starting load.
 Write-Host "Checking $baseUrl/login ..." -ForegroundColor Cyan
 try {
     $probe = Invoke-WebRequest -Uri "$baseUrl/login" -Method GET -UseBasicParsing -TimeoutSec 10
@@ -50,17 +50,16 @@ try {
     exit 1
 }
 
-# Monitoring stack is optional for the report. Docker stats itself is collected locally.
 if (Test-Path $composeFile) {
     Write-Host 'Starting Prometheus/cAdvisor/Grafana monitoring stack...' -ForegroundColor Cyan
     docker compose -f $composeFile up -d | Out-Host
 }
 
-'timestamp,name,cpu_percent,memory_mb,memory_percent,net_rx_mb,net_tx_mb' | Set-Content -Encoding UTF8 $dockerCsv
+'timestamp,name,cpu_percent,memory_mb,memory_percent,net_rx_mb,net_tx_mb,pids' | Set-Content -Encoding UTF8 $dockerCsv
 
-# Sample Docker resources every second while K6 is running.
 $monitorJob = Start-Job -ScriptBlock {
-    param($csv)
+    param($csv, $peakPath)
+
     function ToMB($value) {
         $v = $value.Trim().Replace(',', '.')
         if ($v -match '^([0-9.]+)\s*GiB$') { return [double]$Matches[1] * 1024 }
@@ -73,27 +72,58 @@ $monitorJob = Start-Job -ScriptBlock {
         return 0.0
     }
 
+    $peaks = @{}
+
     while ($true) {
         $sampleTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
-        $lines = docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}|{{.NetIO}}' 2>$null
+        $lines = docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}|{{.NetIO}}|{{.PIDs}}' 2>$null
         foreach ($line in $lines) {
-            $parts = $line -split '\|', 5
-            if ($parts.Count -lt 5) { continue }
+            $parts = $line -split '\|', 6
+            if ($parts.Count -lt 6) { continue }
 
             $name = $parts[0]
-            $cpu = [double](($parts[1] -replace '%','').Replace(',','.'))
+            $cpu = 0.0
+            [double]::TryParse((($parts[1] -replace '%','').Replace(',','.')), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$cpu) | Out-Null
             $memParts = $parts[2] -split '\s*/\s*', 2
             $memMb = if ($memParts.Count -ge 1) { ToMB $memParts[0] } else { 0 }
-            $memPercent = [double](($parts[3] -replace '%','').Replace(',','.'))
+            $memPercent = 0.0
+            [double]::TryParse((($parts[3] -replace '%','').Replace(',','.')), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$memPercent) | Out-Null
             $netParts = $parts[4] -split '\s*/\s*', 2
             $rx = if ($netParts.Count -ge 1) { ToMB $netParts[0] } else { 0 }
             $tx = if ($netParts.Count -ge 2) { ToMB $netParts[1] } else { 0 }
+            $pids = 0
+            [int]::TryParse($parts[5], [ref]$pids) | Out-Null
 
-            "$sampleTime,$name,$cpu,$memMb,$memPercent,$rx,$tx" | Add-Content -Encoding UTF8 $csv
+            "$sampleTime,$name,$cpu,$memMb,$memPercent,$rx,$tx,$pids" | Add-Content -Encoding UTF8 $csv
+
+            if (-not $peaks.ContainsKey($name)) {
+                $peaks[$name] = [ordered]@{
+                    cpu_peak_percent = 0.0
+                    cpu_peak_at = $null
+                    memory_peak_mb = 0.0
+                    memory_peak_at = $null
+                    memory_peak_percent = 0.0
+                    memory_peak_percent_at = $null
+                    net_rx_peak_mb = 0.0
+                    net_rx_peak_at = $null
+                    net_tx_peak_mb = 0.0
+                    net_tx_peak_at = $null
+                    pids_peak = 0
+                    pids_peak_at = $null
+                }
+            }
+
+            $p = $peaks[$name]
+            if ($cpu -gt $p.cpu_peak_percent) { $p.cpu_peak_percent = $cpu; $p.cpu_peak_at = $sampleTime }
+            if ($memMb -gt $p.memory_peak_mb) { $p.memory_peak_mb = $memMb; $p.memory_peak_at = $sampleTime }
+            if ($memPercent -gt $p.memory_peak_percent) { $p.memory_peak_percent = $memPercent; $p.memory_peak_percent_at = $sampleTime }
+            if ($rx -gt $p.net_rx_peak_mb) { $p.net_rx_peak_mb = $rx; $p.net_rx_peak_at = $sampleTime }
+            if ($tx -gt $p.net_tx_peak_mb) { $p.net_tx_peak_mb = $tx; $p.net_tx_peak_at = $sampleTime }
+            if ($pids -gt $p.pids_peak) { $p.pids_peak = $pids; $p.pids_peak_at = $sampleTime }
         }
         Start-Sleep -Seconds 1
     }
-} -ArgumentList $dockerCsv
+} -ArgumentList $dockerCsv, $peakFile
 
 $start = Get-Date
 $k6ExitCode = 1
@@ -107,6 +137,7 @@ try {
 } finally {
     if ($monitorJob) {
         Stop-Job $monitorJob -ErrorAction SilentlyContinue | Out-Null
+        Receive-Job $monitorJob -ErrorAction SilentlyContinue | Out-Null
         Remove-Job $monitorJob -Force -ErrorAction SilentlyContinue | Out-Null
     }
 }
@@ -129,7 +160,7 @@ $metadata | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $runMetadata
 
 Copy-Item $dockerCsv (Join-Path $reportDir 'docker-stats-raw.csv') -Force
 
-# Generate standalone HTML report from the actual K6 summary and Docker samples.
+# Generate peak summary from the collected CSV as a second source of truth.
 $generator = Join-Path $scriptRoot 'generate-report.py'
 if (Get-Command python -ErrorAction SilentlyContinue) {
     & python $generator $reportDir
@@ -146,6 +177,7 @@ Write-Host '============================================================' -Foreg
 Write-Host "Report directory : $reportDir" -ForegroundColor Green
 Write-Host "HTML report      : $summaryHtml" -ForegroundColor Green
 Write-Host "Docker CSV       : $dockerCsv" -ForegroundColor Green
+Write-Host "Peak resources   : $peakFile" -ForegroundColor Green
 Write-Host ''
 
 if ($k6ExitCode -ne 0) { exit $k6ExitCode }
