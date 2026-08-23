@@ -175,5 +175,8 @@ foreach ($roles as $id => $prefix) {
         if ($id == 7) {
             $routes->get('ujian/daftar', 'ObeController::siswaDaftarUjian');
             $routes->get('daftar-ujian', 'ObeController::siswaDaftarUjian');
-
-            // Tambahkan baris ini di dalam blok yang sama:
+            $routes->get('kerjakan-ujian/(:num)', 'ObeController::kerjakanUjian/$1');
+            $routes->post('ujian/selesai/(:num)', 'ObeController::selesaiUjian/$1');
+        }
+    });
+}
