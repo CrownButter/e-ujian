@@ -168,9 +168,9 @@ class WaitingRoom extends BaseController
         return $this->json($result, $status);
     }
 
-    public function consume(): bool
+    public function consumeTicket(string $token): bool
     {
-        $token = trim((string) $this->request->getPost('waiting_room_ticket'));
+        $token = trim($token);
 
         if ($token === '' || !preg_match('/^[a-f0-9]{64}$/', $token)) {
             return false;
