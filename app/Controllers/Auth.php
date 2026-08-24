@@ -6,6 +6,8 @@ class Auth extends BaseController
 {
     protected $helpers = ['url', 'form'];
 
+    private const PASSWORD_BCRYPT_COST = 8;
+
     private function timingEnabled(): bool
     {
         return ENVIRONMENT === 'development'
@@ -44,7 +46,7 @@ class Auth extends BaseController
                     fputcsv($handle, [
                         'timestamp', 'username', 'result', 'validation_ms',
                         'request_ms', 'db_ms', 'password_ms', 'unit_ms',
-                        'unit_queries', 'session_ms', 'total_ms'
+                        'unit_queries', 'session_ms', 'rehash_ms', 'total_ms'
                     ]);
                 }
                 fputcsv($handle, $row);
@@ -114,7 +116,7 @@ class Auth extends BaseController
             $totalMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
             $this->writeAuthTiming([
                 $timestamp, '', 'VALIDATION_FAIL', $validationMs,
-                0, 0, 0, 0, 0, 0, $totalMs
+                0, 0, 0, 0, 0, 0, 0, $totalMs
             ]);
             $this->logTiming('AUTH_TIMING result=VALIDATION_FAIL total={total}ms validation={validation}ms', [
                 'total' => $totalMs,
@@ -151,7 +153,7 @@ class Auth extends BaseController
             $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
             $this->writeAuthTiming([
                 $timestamp, $username, 'FAIL', $validationMs,
-                $requestMs, $dbMs, $passwordMs, 0, 0, $flashMs, $authMs
+                $requestMs, $dbMs, $passwordMs, 0, 0, $flashMs, 0, $authMs
             ]);
             $this->logTiming('AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms request={request}ms db={db}ms password={password}ms flash={flash}ms', [
                 'username' => $username,
@@ -164,6 +166,28 @@ class Auth extends BaseController
             ]);
 
             return redirect()->to('/login');
+        }
+
+        $rehashMs = 0.0;
+        if (password_needs_rehash(
+            $user['password'],
+            PASSWORD_BCRYPT,
+            ['cost' => self::PASSWORD_BCRYPT_COST]
+        )) {
+            $rehashStart = hrtime(true);
+            $newHash = password_hash(
+                $password,
+                PASSWORD_BCRYPT,
+                ['cost' => self::PASSWORD_BCRYPT_COST]
+            );
+
+            if ($newHash !== false) {
+                $db->table('users')
+                    ->where('id', (int) $user['id'])
+                    ->update(['password' => $newHash]);
+            }
+
+            $rehashMs = round((hrtime(true) - $rehashStart) / 1_000_000, 3);
         }
 
         $roleId = (int) $user['role_id'];
@@ -265,9 +289,9 @@ class Auth extends BaseController
         $this->writeAuthTiming([
             $timestamp, $username, 'SUCCESS', $validationMs,
             $requestMs, $dbMs, $passwordMs, $unitMs,
-            $unitQueryCount, $sessionMs, $authMs
+            $unitQueryCount, $sessionMs, $rehashMs, $authMs
         ]);
-        $this->logTiming('AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms request={request}ms db={db}ms password={password}ms unit={unit}ms unit_queries={unit_queries} session={session}ms', [
+        $this->logTiming('AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms request={request}ms db={db}ms password={password}ms unit={unit}ms unit_queries={unit_queries} session={session}ms rehash={rehash}ms', [
             'username' => $username,
             'total' => $authMs,
             'validation' => $validationMs,
@@ -277,6 +301,7 @@ class Auth extends BaseController
             'unit' => $unitMs,
             'unit_queries' => $unitQueryCount,
             'session' => $sessionMs,
+            'rehash' => $rehashMs,
         ]);
 
         if ($roleId === 7) {
