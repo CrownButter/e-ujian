@@ -6,13 +6,24 @@ $slowlogTimeout = if ($env:PHP_FPM_SLOWLOG_TIMEOUT) { $env:PHP_FPM_SLOWLOG_TIMEO
 $slowlogPath = '/tmp/e-ujian-php-fpm-slowlog.log'
 
 function Invoke-DockerExec([string[]]$Arguments) {
-    $output = & docker exec @Arguments 2>&1 | Out-String
-    [pscustomobject]@{ Output = $output.TrimEnd(); ExitCode = $LASTEXITCODE }
+    $previousPreference = $ErrorActionPreference
+    try {
+        # Native docker commands commonly write NOTICE/WARNING messages to stderr even
+        # when they exit successfully. Do not let PowerShell convert those messages into
+        # terminating NativeCommandError exceptions.
+        $ErrorActionPreference = 'Continue'
+        $output = & docker exec @Arguments 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+        return [pscustomobject]@{ Output = $output.TrimEnd(); ExitCode = $exitCode }
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
 }
 
 function Invoke-ContainerShellScript([string]$Script) {
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script))
-    Invoke-DockerExec @($phpContainer, 'sh', '-c', "printf '%s' '$encoded' | base64 -d | sh")
+    return Invoke-DockerExec @($phpContainer, 'sh', '-c', "printf '%s' '$encoded' | base64 -d | sh")
 }
 
 function Save-Text([string]$Path, [string]$Text) {
