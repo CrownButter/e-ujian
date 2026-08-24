@@ -48,12 +48,36 @@ set -e
 cp "$poolPath" "$backupPath"
 sed -i '/; E-UJIAN-SLOWLOG-BEGIN/,/; E-UJIAN-SLOWLOG-END/d' "$poolPath"
 printf '%s' '$patchB64' | base64 -d >> "$poolPath"
-php-fpm -tt 2>&1 || php-fpm8.3 -tt 2>&1 || php-fpm8.2 -tt 2>&1 || php-fpm8.1 -tt 2>&1
+
+# Validate using the process exit code. Do not classify normal php-fpm -tt
+# NOTICE output as an error: some NOTICE lines contain words such as
+# "unknown value" even when the overall configuration test succeeds.
+if command -v php-fpm >/dev/null 2>&1; then
+  php-fpm -tt 2>&1
+  rc=$?
+elif command -v php-fpm8.3 >/dev/null 2>&1; then
+  php-fpm8.3 -tt 2>&1
+  rc=$?
+elif command -v php-fpm8.2 >/dev/null 2>&1; then
+  php-fpm8.2 -tt 2>&1
+  rc=$?
+elif command -v php-fpm8.1 >/dev/null 2>&1; then
+  php-fpm8.1 -tt 2>&1
+  rc=$?
+else
+  echo 'ERROR: no PHP-FPM binary found'
+  rc=127
+fi
+printf '\n__PHP_FPM_TT_RC=%s\n' "$rc"
+exit "$rc"
 "@
 $result = Invoke-PhpScript $backupScript
-if ($result -match '(?i)(error|failed|syntax error|invalid value)') {
+$rcMatch = [regex]::Match($result, '__PHP_FPM_TT_RC=(\d+)')
+$validationRc = if ($rcMatch.Success) { [int]$rcMatch.Groups[1].Value } else { 255 }
+
+if ($validationRc -ne 0) {
     Invoke-Php "cp '$backupPath' '$poolPath'"
-    throw "PHP-FPM configuration validation failed:`n$result"
+    throw "PHP-FPM configuration validation failed (exit code $validationRc):`n$result"
 }
 
 Invoke-Php 'kill -USR2 1'
