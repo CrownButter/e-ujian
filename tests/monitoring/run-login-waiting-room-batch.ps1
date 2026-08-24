@@ -14,26 +14,11 @@ $script = Join-Path $root 'tests\load\k6\login-waiting-room-batch.js'
 $timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $reportRoot = Join-Path $root "tests\load\results\${timestamp}_waiting_room_batch"
 
-if (-not (Test-Path $script)) {
-    throw "K6 script not found: $script"
-}
+if (-not (Test-Path $script)) { throw "K6 script not found: $script" }
 
-$vus = @(
-    $VuMatrix -split ',' |
-        ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -ne '' } |
-        ForEach-Object { [int]$_ }
-)
-
-if ($vus.Count -eq 0) {
-    throw 'VuMatrix must contain at least one positive integer.'
-}
-
-foreach ($vu in $vus) {
-    if ($vu -lt 1 -or $vu -gt 709) {
-        throw "VU value must be between 1 and 709. Received: $vu"
-    }
-}
+$vus = @($VuMatrix -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ })
+if ($vus.Count -eq 0) { throw 'VuMatrix must contain at least one positive integer.' }
+foreach ($vu in $vus) { if ($vu -lt 1 -or $vu -gt 709) { throw "VU value must be between 1 and 709. Received: $vu" } }
 
 New-Item -ItemType Directory -Force -Path $reportRoot | Out-Null
 
@@ -47,16 +32,11 @@ Write-Host "Poll interval         : ${PollIntervalSeconds}s"
 Write-Host "Report                : $reportRoot"
 Write-Host ''
 
-# Basic application check.
 try {
     $health = Invoke-WebRequest -Uri "$BaseUrl/login" -Method GET -UseBasicParsing -TimeoutSec 10
-    if ($health.StatusCode -ne 200) {
-        throw "GET /login returned HTTP $($health.StatusCode)"
-    }
+    if ($health.StatusCode -ne 200) { throw "GET /login returned HTTP $($health.StatusCode)" }
     Write-Host '[OK] GET /login HTTP 200'
-} catch {
-    throw "Application check failed: $($_.Exception.Message)"
-}
+} catch { throw "Application check failed: $($_.Exception.Message)" }
 
 $rows = @()
 
@@ -80,9 +60,7 @@ foreach ($vu in $vus) {
 
     $k6Exit = 0
     & k6 run --summary-export $summary $script 2>&1 | Tee-Object -FilePath $console
-    if ($LASTEXITCODE -ne 0) {
-        $k6Exit = $LASTEXITCODE
-    }
+    if ($LASTEXITCODE -ne 0) { $k6Exit = $LASTEXITCODE }
 
     $loginSuccessRate = 0.0
     $httpFailedRate = 0.0
@@ -98,28 +76,47 @@ foreach ($vu in $vus) {
     if (Test-Path $summary) {
         try {
             $obj = Get-Content $summary -Raw | ConvertFrom-Json
-            $result = if ($obj.result) { $obj.result } else { $null }
-            $metrics = if ($obj.metrics) { $obj.metrics } else { $null }
+            $result = $null
+            $metrics = $null
+            if ($null -ne $obj.PSObject.Properties['result']) { $result = $obj.result }
+            if ($null -ne $obj.PSObject.Properties['metrics']) { $metrics = $obj.metrics }
 
-            if ($result) {
-                $loginSuccessRate = [double]($result.login_success_rate ?? 0)
-                $httpFailedRate = [double]($result.http_failed_rate ?? 0)
-                $queueReady = [int]($result.queue_ready ?? 0)
-                $queueExpired = [int]($result.queue_expired ?? 0)
-                $authSuccess = [int]($result.auth_success ?? 0)
-                $authFailure = [int]($result.auth_failure ?? 0)
+            function Get-ValueOrDefault([object]$Object, [string]$Name, [object]$Default) {
+                if ($null -eq $Object) { return $Default }
+                $property = $Object.PSObject.Properties[$Name]
+                if ($null -eq $property -or $null -eq $property.Value) { return $Default }
+                return $property.Value
             }
 
-            if ($metrics) {
-                if ($metrics.login_duration -and $metrics.login_duration.values) {
-                    $loginP95 = [double]($metrics.login_duration.values.'p(95)' ?? 0)
-                    $loginP99 = [double]($metrics.login_duration.values.'p(99)' ?? 0)
+            if ($null -ne $result) {
+                $loginSuccessRate = [double](Get-ValueOrDefault $result 'login_success_rate' 0)
+                $httpFailedRate = [double](Get-ValueOrDefault $result 'http_failed_rate' 0)
+                $queueReady = [int](Get-ValueOrDefault $result 'queue_ready' 0)
+                $queueExpired = [int](Get-ValueOrDefault $result 'queue_expired' 0)
+                $authSuccess = [int](Get-ValueOrDefault $result 'auth_success' 0)
+                $authFailure = [int](Get-ValueOrDefault $result 'auth_failure' 0)
+            }
+
+            if ($null -ne $metrics) {
+                $loginMetric = Get-ValueOrDefault $metrics 'login_duration' $null
+                if ($null -ne $loginMetric) {
+                    $values = Get-ValueOrDefault $loginMetric 'values' $null
+                    if ($null -ne $values) {
+                        $loginP95 = [double](Get-ValueOrDefault $values 'p(95)' 0)
+                        $loginP99 = [double](Get-ValueOrDefault $values 'p(99)' 0)
+                    }
                 }
-                if ($metrics.queue_wait_duration -and $metrics.queue_wait_duration.values) {
-                    $queueP95 = [double]($metrics.queue_wait_duration.values.'p(95)' ?? 0)
+
+                $queueMetric = Get-ValueOrDefault $metrics 'queue_wait_duration' $null
+                if ($null -ne $queueMetric) {
+                    $values = Get-ValueOrDefault $queueMetric 'values' $null
+                    if ($null -ne $values) { $queueP95 = [double](Get-ValueOrDefault $values 'p(95)' 0) }
                 }
-                if ($metrics.auth_duration -and $metrics.auth_duration.values) {
-                    $authP95 = [double]($metrics.auth_duration.values.'p(95)' ?? 0)
+
+                $authMetric = Get-ValueOrDefault $metrics 'auth_duration' $null
+                if ($null -ne $authMetric) {
+                    $values = Get-ValueOrDefault $authMetric 'values' $null
+                    if ($null -ne $values) { $authP95 = [double](Get-ValueOrDefault $values 'p(95)' 0) }
                 }
             }
         } catch {
