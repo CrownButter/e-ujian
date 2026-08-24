@@ -41,25 +41,18 @@ class Filters extends BaseFilters
     /**
      * List of special required filters.
      *
-     * The filters listed here are special. They are applied before and after
-     * other kinds of filters, and always applied even if a route does not exist.
-     *
-     * Filters set by default provide framework functionality. If removed,
-     * those functions will no longer work.
-     *
-     * @see https://codeigniter.com/user_guide/incoming/filters.html#provided-filters
+     * These are intentionally limited to behavior that should apply to the
+     * complete application. PageCache and PerformanceMetrics are not required
+     * globally because they add request-path work and are not appropriate for
+     * stateful/authentication endpoints under concurrency tests.
      *
      * @var array{before: list<string>, after: list<string>}
      */
     public array $required = [
         'before' => [
             'forcehttps', // Force Global Secure Requests
-            'pagecache',  // Web Page Caching
         ],
         'after' => [
-            'pagecache',   // Web Page Caching
-            'performance', // Performance Metrics
-            // 'toolbar',     // Debug Toolbar
         ],
     ];
 
@@ -112,5 +105,13 @@ class Filters extends BaseFilters
      *
      * @var array<string, array<string, list<string>>>
      */
-    public array $filters = [];
+    public array $filters = [
+        // PerformanceMetrics is useful during targeted profiling, but should
+        // not run on every request in the normal application hot path.
+        'performance' => [
+            'after' => [
+                'benchmark/*',
+            ],
+        ],
+    ];
 }
