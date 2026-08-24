@@ -130,7 +130,14 @@ class Auth extends BaseController
         $requestStart = hrtime(true);
         $username = $this->request->getPost('username');
         $password = $this->request->getPost('password');
+        $waitingRoomTicket = trim((string) $this->request->getPost('waiting_room_ticket'));
         $requestMs = round((hrtime(true) - $requestStart) / 1_000_000, 3);
+
+        $waitingRoom = new \App\Controllers\WaitingRoom();
+        if (!$waitingRoom->consumeTicket($waitingRoomTicket)) {
+            session()->setFlashdata('msg', 'Sistem sedang mengatur antrean login. Silakan coba lagi.');
+            return redirect()->to('/login')->withInput();
+        }
 
         $db = \Config\Database::connect();
 
