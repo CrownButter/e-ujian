@@ -81,67 +81,6 @@ function Invoke-PhpExec([string]$command) {
     }
 }
 
-function Get-PhpFpmProcSnapshot {
-    $script = @'
-count=0
-master=0
-running=0
-sleeping=0
-disk_sleep=0
-zombie=0
-other=0
-cpu_ticks=0
-rss_kb=0
-pids=""
-for p in /proc/[0-9]*; do
-    [ -r "$p/cmdline" ] || continue
-    cmd=$(tr "\0" " " < "$p/cmdline" 2>/dev/null)
-    case "$cmd" in
-        *"php-fpm: master process"*)
-            master=$((master+1))
-            ;;
-        *"php-fpm: pool www"*)
-            count=$((count+1))
-            pid=${p##*/}
-            stat_line=$(cat "$p/stat" 2>/dev/null)
-            state=$(echo "$stat_line" | awk '{print $3}')
-            case "$state" in
-                R) running=$((running+1));;
-                S) sleeping=$((sleeping+1));;
-                D) disk_sleep=$((disk_sleep+1));;
-                Z) zombie=$((zombie+1));;
-                *) other=$((other+1));;
-            esac
-            utime=$(echo "$stat_line" | awk '{print $14}')
-            stime=$(echo "$stat_line" | awk '{print $15}')
-            [ -n "$utime" ] && [ -n "$stime" ] && cpu_ticks=$((cpu_ticks + utime + stime))
-            rss=$(awk '/^VmRSS:/ {print $2}' "$p/status" 2>/dev/null)
-            [ -n "$rss" ] && rss_kb=$((rss_kb + rss))
-            pids="${pids}${pids:+,}$pid"
-            ;;
-    esac
-done
-printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$count" "$master" "$running" "$sleeping" "$disk_sleep" "$zombie" "$other" "$cpu_ticks" "$rss_kb" "$pids"
-'@
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
-    $result = Invoke-PhpExec "echo $encoded | base64 -d | sh"
-    if ($result -match '^([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|(.*)$') {
-        return [pscustomobject]@{
-            workers = [int]$Matches[1]
-            master = [int]$Matches[2]
-            running = [int]$Matches[3]
-            sleeping = [int]$Matches[4]
-            disk_sleep = [int]$Matches[5]
-            zombie = [int]$Matches[6]
-            other = [int]$Matches[7]
-            cpu_ticks = [long]$Matches[8]
-            rss_kb = [long]$Matches[9]
-            pids = $Matches[10]
-        }
-    }
-    return [pscustomobject]@{ workers=0; master=0; running=0; sleeping=0; disk_sleep=0; zombie=0; other=0; cpu_ticks=0; rss_kb=0; pids='' }
-}
-
 Write-Host "Capturing PHP-FPM configuration/process state from $phpContainer ..." -ForegroundColor Cyan
 Set-Content -Encoding UTF8 $phpFpmBefore -Value (Invoke-PhpExec 'php-fpm -tt 2>&1 || php-fpm8.3 -tt 2>&1 || php-fpm8.2 -tt 2>&1 || php-fpm8.1 -tt 2>&1')
 Set-Content -Encoding UTF8 $phpRuntimeBefore -Value (Invoke-PhpExec 'php -i 2>/dev/null | grep -E "^(PHP Version|memory_limit|opcache.enable|opcache.memory_consumption|realpath_cache_size|session.save_handler|session.save_path)" || true')
@@ -227,18 +166,33 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$workers" "$master" "$running" "$sleep
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($workerScript))
         $workerResult = (& docker exec $phpContainerName sh -c "echo $b64 | base64 -d | sh" 2>$null | Out-String).TrimEnd()
         if ($workerResult -match '^([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|([0-9]+)\|(.*)$') {
-            "$sampleTime,$($Matches[1]),$($Matches[2]),$($Matches[3]),$($Matches[4]),$($Matches[5]),$($Matches[6]),$($Matches[7]),$($Matches[8]),$($Matches[9]),$([regex]::Matches($Matches[10], ',').Count + ($(if ($Matches[10]) {1}else{0})) )" | Add-Content -Encoding UTF8 $phpPath
-            "$sampleTime,$($Matches[1]),$($Matches[2]),$($Matches[3]),$($Matches[4]),$($Matches[5]),$($Matches[6]),$($Matches[7]),$($Matches[8]),$($Matches[9]),$($Matches[10])" | Add-Content -Encoding UTF8 $phpRawPath
+            $workerCount = [int]$Matches[1]
+            $pidList = $Matches[10]
+            "$sampleTime,$($Matches[1]),$($Matches[2]),$($Matches[3]),$($Matches[4]),$($Matches[5]),$($Matches[6]),$($Matches[7]),$($Matches[8]),$($Matches[9]),$([regex]::Matches($pidList, ',').Count + $(if ($pidList) { 1 } else { 0 }))" | Add-Content -Encoding UTF8 $phpPath
+            "$sampleTime,$($Matches[1]),$($Matches[2]),$($Matches[3]),$($Matches[4]),$($Matches[5]),$($Matches[6]),$($Matches[7]),$($Matches[8]),$($Matches[9]),$pidList" | Add-Content -Encoding UTF8 $phpRawPath
 
-            foreach ($pid in ($Matches[10] -split ',' | Where-Object { $_ })) {
-                $pidScript = "if [ -r /proc/$pid/stat ]; then stat=\$(cat /proc/$pid/stat 2>/dev/null); state=\$(echo \"\$stat\" | awk '{print \$3}'); u=\$(echo \"\$stat\" | awk '{print \$14}'); s=\$(echo \"\$stat\" | awk '{print \$15}'); rss=\$(awk '/^VmRSS:/ {print \$2}' /proc/$pid/status 2>/dev/null); cmd=\$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null); printf '%s|%s|%s|%s|%s\n' \"\$state\" \"\$u\" \"\$s\" \"\$rss\" \"\$cmd\"; fi"
-                $pidResult = (& docker exec $phpContainerName sh -c $pidScript 2>$null | Out-String).TrimEnd()
+            # Per-PID diagnostics use a single-quoted here-string. This prevents
+            # PowerShell from parsing the Linux '<' redirection operator.
+            foreach ($pid in ($pidList -split ',' | Where-Object { $_ })) {
+                $pidScript = @'
+if [ -r /proc/__PID__/stat ]; then
+    stat=$(cat /proc/__PID__/stat 2>/dev/null)
+    state=$(echo "$stat" | awk '{print $3}')
+    u=$(echo "$stat" | awk '{print $14}')
+    s=$(echo "$stat" | awk '{print $15}')
+    rss=$(awk '/^VmRSS:/ {print $2}' /proc/__PID__/status 2>/dev/null)
+    cmd=$(tr '\0' ' ' < /proc/__PID__/cmdline 2>/dev/null)
+    printf '%s|%s|%s|%s|%s\n' "$state" "$u" "$s" "$rss" "$cmd"
+fi
+'@ -replace '__PID__', $pid
+                $pidB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pidScript))
+                $pidResult = (& docker exec $phpContainerName sh -c "echo $pidB64 | base64 -d | sh" 2>$null | Out-String).TrimEnd()
                 if ($pidResult -match '^([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|(.*)$') {
-                    $ticks = 0
-                    [long]::TryParse($Matches[2], [ref]$u) | Out-Null
+                    $uTicks = 0
+                    [long]::TryParse($Matches[2], [ref]$uTicks) | Out-Null
                     $sTicks = 0
                     [long]::TryParse($Matches[3], [ref]$sTicks) | Out-Null
-                    $ticks = $u + $sTicks
+                    $ticks = $uTicks + $sTicks
                     $rss = 0
                     [long]::TryParse($Matches[4], [ref]$rss) | Out-Null
                     "$sampleTime,$pid,$($Matches[1]),$ticks,$rss,$($Matches[5] -replace ',',';')" | Add-Content -Encoding UTF8 $phpPidPath
@@ -263,75 +217,52 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$workers" "$master" "$running" "$sleep
     }
 } -ArgumentList $dockerCsv, $tcpCsv, $containerCsv, $phpFpmCsv, $phpFpmRawCsv, $phpPidCsv, $tcpPort, $phpContainer
 
-$start = Get-Date
-$k6ExitCode = 1
+$k6Exit = 0
 try {
     if ($k6Mode -eq 'ramp') {
-        Write-Host "Running K6 RAMP-UP: 0 -> $vus VUs..." -ForegroundColor Yellow
-        $env:K6_SUMMARY_FILE = $summaryFile
+        Write-Host "Running K6 RAMP-UP: 0 -> $vus VUs..." -ForegroundColor Cyan
         & k6 run -e "BASE_URL=$baseUrl" -e "VUS=$vus" $k6Script
     } else {
-        Write-Host "Running K6 BURST: $vus VUs / 1 iteration per VU..." -ForegroundColor Yellow
-        $env:K6_SUMMARY_FILE = $summaryFile
+        Write-Host "Running K6 BURST: $vus VUs..." -ForegroundColor Cyan
         & k6 run -e "BASE_URL=$baseUrl" -e "VUS=$vus" -e "ITERATIONS=$iterations" $k6Script
     }
-    $k6ExitCode = $LASTEXITCODE
+    $k6Exit = $LASTEXITCODE
 } finally {
     if ($monitorJob) {
         Stop-Job $monitorJob -ErrorAction SilentlyContinue | Out-Null
         Receive-Job $monitorJob -ErrorAction SilentlyContinue | Out-Null
-        Remove-Job $monitorJob -Force -ErrorAction SilentlyContinue | Out-Null
+        Remove-Job $monitorJob -Force -ErrorAction SilentlyContinue
     }
 }
-
-$end = Get-Date
-$durationSeconds = [math]::Round(($end - $start).TotalSeconds, 3)
 
 Write-Host 'Capturing PHP-FPM post-test diagnostics...' -ForegroundColor Cyan
 Set-Content -Encoding UTF8 $phpFpmAfter -Value (Invoke-PhpExec 'php-fpm -tt 2>&1 || php-fpm8.3 -tt 2>&1 || php-fpm8.2 -tt 2>&1 || php-fpm8.1 -tt 2>&1')
 Set-Content -Encoding UTF8 $phpRuntimeAfter -Value (Invoke-PhpExec 'php -i 2>/dev/null | grep -E "^(PHP Version|memory_limit|opcache.enable|opcache.memory_consumption|realpath_cache_size|session.save_handler|session.save_path)" || true')
 Set-Content -Encoding UTF8 $phpProcessAfter -Value (Invoke-PhpExec 'for p in /proc/[0-9]*; do [ -r "$p/cmdline" ] || continue; cmd=$(tr "\0" " " < "$p/cmdline" 2>/dev/null); case "$cmd" in *"php-fpm"*) echo "$p $cmd";; esac; done')
 
-try {
-    docker logs --tail 500 $phpContainer 2>&1 | Set-Content -Encoding UTF8 (Join-Path $reportDir 'php-fpm-log-tail.txt')
-} catch {
-    "docker logs failed: $($_.Exception.Message)" | Set-Content -Encoding UTF8 (Join-Path $reportDir 'php-fpm-log-tail.txt')
-}
-
-& docker stats --no-stream --format '{{json .}}' | Set-Content -Path (Join-Path $reportDir 'docker-stats-raw.jsonl') -Encoding UTF8
-
 $metadata = [ordered]@{
-    test_name = 'E-UJIAN concurrent login'
-    mode = $k6Mode
-    started_at = $start.ToString('o')
-    finished_at = $end.ToString('o')
-    duration_seconds = $durationSeconds
+    generated_at = (Get-Date).ToString('o')
     base_url = $baseUrl
+    mode = $k6Mode
     vus = $vus
-    iterations = if ($k6Mode -eq 'burst') { $iterations } else { $null }
-    iterations_per_vu = if ($k6Mode -eq 'burst') { 1 } else { $null }
-    executor = if ($k6Mode -eq 'burst') { 'per-vu-iterations' } else { 'ramping-vus' }
-    account_range = "001-$('{0:D3}' -f $vus)"
-    tcp_port = $tcpPort
+    iterations = $iterations
     php_container = $phpContainer
-    php_fpm_sampling_ms = 200
-    php_fpm_detection = '/proc/[pid]/cmdline contains php-fpm: pool www'
-    k6_script = $k6ScriptName
-    k6_exit_code = $k6ExitCode
+    php_fpm_sampling_interval_ms = 200
+    php_fpm_worker_detection = '/proc/[pid]/cmdline contains php-fpm: pool www'
+    k6_exit_code = $k6Exit
 }
 $metadata | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $runMetadata
 
 Write-Host ''
-Write-Host '============================================================' -ForegroundColor Green
-Write-Host ' TEST FINISHED' -ForegroundColor Green
-Write-Host '============================================================' -ForegroundColor Green
-Write-Host "Report directory : $reportDir" -ForegroundColor Green
-Write-Host "PHP-FPM CSV      : $phpFpmCsv" -ForegroundColor Green
-Write-Host "PHP-FPM Raw CSV  : $phpFpmRawCsv" -ForegroundColor Green
-Write-Host "PHP-FPM PID CSV  : $phpPidCsv" -ForegroundColor Green
-Write-Host "Docker CSV       : $dockerCsv" -ForegroundColor Green
-Write-Host "TCP CSV          : $tcpCsv" -ForegroundColor Green
-Write-Host "Container CSV    : $containerCsv" -ForegroundColor Green
-Write-Host "K6 exit code     : $k6ExitCode" -ForegroundColor Green
+Write-Host '============================================================' -ForegroundColor Cyan
+Write-Host ' TEST FINISHED' -ForegroundColor Cyan
+Write-Host '============================================================' -ForegroundColor Cyan
+Write-Host "Report directory : $reportDir"
+Write-Host "Docker CSV       : $dockerCsv"
+Write-Host "TCP CSV          : $tcpCsv"
+Write-Host "Container CSV    : $containerCsv"
+Write-Host "PHP-FPM CSV      : $phpFpmCsv"
+Write-Host "Peak resources   : $(Join-Path $reportDir 'peak-resources.json')"
+Write-Host ''
 
-exit $k6ExitCode
+exit $k6Exit
