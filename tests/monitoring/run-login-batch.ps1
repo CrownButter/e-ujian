@@ -81,6 +81,8 @@ Write-Host ' START K6 BATCH TEST'
 Write-Host '============================================================'
 Write-Host '[INFO] K6 menjalankan TOTAL_USERS VU dan setiap VU menunggu'
 Write-Host '[INFO] sesuai batch sebelum melakukan GET /login + POST /auth.'
+Write-Host '[INFO] Output stderr k6 ditangkap sebagai output biasa agar'
+Write-Host '[INFO] warning k6 tidak dianggap syntax/error PowerShell.'
 Write-Host ''
 
 $env:BASE_URL = $BaseUrl.TrimEnd('/')
@@ -90,8 +92,20 @@ $env:BATCH_INTERVAL_SECONDS = [string]$BatchIntervalSeconds
 $env:K6_SUMMARY_FILE = $summaryFile
 
 $k6Args = @('run', $scriptPath)
-& k6 @k6Args 2>&1 | Tee-Object -FilePath $k6OutputFile
-$k6ExitCode = $LASTEXITCODE
+
+# PowerShell dengan $ErrorActionPreference=Stop dapat mengubah stderr
+# dari native executable menjadi NativeCommandError. k6 memang menulis
+# warning/threshold messages ke stderr, sehingga invocation k6 harus
+# dijalankan dengan ErrorActionPreference=Continue.
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & k6 @k6Args 2>&1 | Tee-Object -FilePath $k6OutputFile
+    $k6ExitCode = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
 
 Write-Host ''
 Write-Host '============================================================'
@@ -104,7 +118,9 @@ Write-Host ("Docker state     : {0}" -f $dockerStateFile)
 Write-Host ''
 
 if ($k6ExitCode -ne 0) {
-    Write-Host '[WARN] K6 threshold atau test execution gagal. Lihat k6-output.txt.' -ForegroundColor Yellow
+    Write-Host '[WARN] K6 selesai dengan exit code non-zero.' -ForegroundColor Yellow
+    Write-Host '[WARN] Ini biasanya berarti threshold/test execution gagal; bukan otomatis syntax error PowerShell.' -ForegroundColor Yellow
+    Write-Host '[INFO] Periksa k6-output.txt dan summary.json.'
 }
 
 exit $k6ExitCode
