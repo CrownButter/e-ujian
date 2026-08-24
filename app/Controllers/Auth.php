@@ -64,19 +64,31 @@ class Auth extends BaseController
 
         $db = \Config\Database::connect();
 
+        // Fetch all authentication/session data needed by a successful login
+        // in one query. This removes the second users/profile round trip from
+        // the hot path while preserving the existing role and unit semantics.
         $dbStart = hrtime(true);
-        $user = $db->table('users')
-            ->select('id, username, password, role_id')
-            ->where('username', $username)
+        $profile = $db->table('users')
+            ->select('users.id, users.username, users.password, users.role_id, '
+                . 'roles.nama_role, '
+                . 'pegawai.id as pegawai_id, pegawai.nama as nama_pegawai, '
+                . 'pegawai.nomor_induk as pegawai_nomor_induk, '
+                . 'siswa.nama as nama_siswa, siswa.pleton_id as siswa_pleton_id, '
+                . 'pleton_siswa.nama_pleton as siswa_nama_pleton')
+            ->join('roles', 'roles.id = users.role_id', 'left')
+            ->join('pegawai', 'pegawai.user_id = users.id', 'left')
+            ->join('siswa', 'siswa.user_id = users.id', 'left')
+            ->join('pleton as pleton_siswa', 'pleton_siswa.id = siswa.pleton_id', 'left')
+            ->where('users.username', $username)
             ->get()
             ->getRowArray();
         $dbMs = round((hrtime(true) - $dbStart) / 1_000_000, 3);
 
         $passwordStart = hrtime(true);
-        $passwordValid = $user && password_verify($password, $user['password']);
+        $passwordValid = $profile && password_verify($password, $profile['password']);
         $passwordMs = round((hrtime(true) - $passwordStart) / 1_000_000, 3);
 
-        if (!$user || !$passwordValid) {
+        if (!$profile || !$passwordValid) {
             $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
             if ($timingEnabled) {
                 log_message('info', 'AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms', [
@@ -92,43 +104,7 @@ class Auth extends BaseController
             return redirect()->to('/login');
         }
 
-        $roleId = (int) $user['role_id'];
-
-        $profileStart = hrtime(true);
-
-        $profile = $db->table('users')
-            ->select('users.id, users.username, users.role_id, roles.nama_role, '
-                . 'pegawai.id as pegawai_id, pegawai.nama as nama_pegawai, '
-                . 'pegawai.nomor_induk as pegawai_nomor_induk, '
-                . 'siswa.nama as nama_siswa, siswa.pleton_id as siswa_pleton_id, '
-                . 'pleton_siswa.nama_pleton as siswa_nama_pleton')
-            ->join('roles', 'roles.id = users.role_id', 'left')
-            ->join('pegawai', 'pegawai.user_id = users.id', 'left')
-            ->join('siswa', 'siswa.user_id = users.id', 'left')
-            ->join('pleton as pleton_siswa', 'pleton_siswa.id = siswa.pleton_id', 'left')
-            ->where('users.id', $user['id'])
-            ->get()
-            ->getRowArray();
-
-        $profileMs = round((hrtime(true) - $profileStart) / 1_000_000, 3);
-
-        if (!$profile) {
-            $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
-            if ($timingEnabled) {
-                log_message('info', 'AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms profile={profile}ms', [
-                    'username' => $username,
-                    'total' => $authMs,
-                    'validation' => $validationMs,
-                    'db' => $dbMs,
-                    'password' => $passwordMs,
-                    'profile' => $profileMs,
-                ]);
-            }
-
-            session()->setFlashdata('msg', 'Data pengguna tidak ditemukan');
-            return redirect()->to('/login');
-        }
-
+        $roleId = (int) $profile['role_id'];
         $namaRole = $profile['nama_role'] ?? 'User';
         $nama = ($roleId === 7)
             ? ($profile['nama_siswa'] ?? 'User')
@@ -150,6 +126,8 @@ class Auth extends BaseController
         if (isset($unitTableByRole[$roleId]) && !empty($profile['pegawai_id'])) {
             $u = $unitTableByRole[$roleId];
 
+            // Keep the existing fallback semantics, but only execute the
+            // second lookup when the primary ID lookup actually misses.
             $row = $db->table($u['table'])
                 ->select($u['nameCol'])
                 ->where($u['col'], (int) $profile['pegawai_id'])
@@ -179,8 +157,8 @@ class Auth extends BaseController
         $sessionStart = hrtime(true);
 
         session()->set([
-            'user_id'       => $user['id'],
-            'username'      => $user['username'],
+            'user_id'       => $profile['id'],
+            'username'      => $profile['username'],
             'role_id'       => $roleId,
             'nama_role'     => $namaRole,
             'nama_pleton'   => $nama_pleton,
@@ -200,7 +178,7 @@ class Auth extends BaseController
                 'validation' => $validationMs,
                 'db' => $dbMs,
                 'password' => $passwordMs,
-                'profile' => $profileMs,
+                'profile' => 0,
                 'unit' => $unitMs,
                 'session' => $sessionMs,
             ]);
