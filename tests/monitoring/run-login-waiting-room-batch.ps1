@@ -38,6 +38,47 @@ try {
     Write-Host '[OK] GET /login HTTP 200'
 } catch { throw "Application check failed: $($_.Exception.Message)" }
 
+function Get-SummaryMetric {
+    param(
+        [Parameter(Mandatory=$true)][object]$Metrics,
+        [Parameter(Mandatory=$true)][string]$MetricName,
+        [Parameter(Mandatory=$true)][string]$ValueName,
+        [object]$Default = 0
+    )
+
+    if ($null -eq $Metrics) { return $Default }
+    $metricProperty = $Metrics.PSObject.Properties[$MetricName]
+    if ($null -eq $metricProperty -or $null -eq $metricProperty.Value) { return $Default }
+
+    $metric = $metricProperty.Value
+    $valueProperty = $metric.PSObject.Properties[$ValueName]
+    if ($null -ne $valueProperty -and $null -ne $valueProperty.Value) {
+        return $valueProperty.Value
+    }
+
+    $valuesProperty = $metric.PSObject.Properties['values']
+    if ($null -ne $valuesProperty -and $null -ne $valuesProperty.Value) {
+        $nested = $valuesProperty.Value.PSObject.Properties[$ValueName]
+        if ($null -ne $nested -and $null -ne $nested.Value) { return $nested.Value }
+    }
+
+    return $Default
+}
+
+function Get-SummaryValue {
+    param(
+        [Parameter(Mandatory=$true)][object]$Metrics,
+        [Parameter(Mandatory=$true)][string[]]$Names,
+        [object]$Default = 0
+    )
+
+    foreach ($name in $Names) {
+        $property = $Metrics.PSObject.Properties[$name]
+        if ($null -ne $property -and $null -ne $property.Value) { return $property.Value }
+    }
+    return $Default
+}
+
 $rows = @()
 
 foreach ($vu in $vus) {
@@ -76,47 +117,58 @@ foreach ($vu in $vus) {
     if (Test-Path $summary) {
         try {
             $obj = Get-Content $summary -Raw | ConvertFrom-Json
-            $result = $null
             $metrics = $null
-            if ($null -ne $obj.PSObject.Properties['result']) { $result = $obj.result }
             if ($null -ne $obj.PSObject.Properties['metrics']) { $metrics = $obj.metrics }
 
-            function Get-ValueOrDefault([object]$Object, [string]$Name, [object]$Default) {
-                if ($null -eq $Object) { return $Default }
-                $property = $Object.PSObject.Properties[$Name]
-                if ($null -eq $property -or $null -eq $property.Value) { return $Default }
-                return $property.Value
-            }
-
-            if ($null -ne $result) {
-                $loginSuccessRate = [double](Get-ValueOrDefault $result 'login_success_rate' 0)
-                $httpFailedRate = [double](Get-ValueOrDefault $result 'http_failed_rate' 0)
-                $queueReady = [int](Get-ValueOrDefault $result 'queue_ready' 0)
-                $queueExpired = [int](Get-ValueOrDefault $result 'queue_expired' 0)
-                $authSuccess = [int](Get-ValueOrDefault $result 'auth_success' 0)
-                $authFailure = [int](Get-ValueOrDefault $result 'auth_failure' 0)
-            }
-
             if ($null -ne $metrics) {
-                $loginMetric = Get-ValueOrDefault $metrics 'login_duration' $null
-                if ($null -ne $loginMetric) {
-                    $values = Get-ValueOrDefault $loginMetric 'values' $null
-                    if ($null -ne $values) {
-                        $loginP95 = [double](Get-ValueOrDefault $values 'p(95)' 0)
-                        $loginP99 = [double](Get-ValueOrDefault $values 'p(99)' 0)
+                # K6 summary-export stores rate/count metrics under metrics.<name>.values.
+                $loginSuccessRate = [double](Get-SummaryMetric $metrics 'login_success_rate' 'rate' 0)
+                $httpFailedRate = [double](Get-SummaryMetric $metrics 'http_failed_rate' 'rate' 0)
+                $queueReady = [int](Get-SummaryMetric $metrics 'queue_ready' 'count' 0)
+                $queueExpired = [int](Get-SummaryMetric $metrics 'queue_expired' 'count' 0)
+                $authSuccess = [int](Get-SummaryMetric $metrics 'auth_success' 'count' 0)
+                $authFailure = [int](Get-SummaryMetric $metrics 'auth_failure' 'count' 0)
+
+                $loginP95 = [double](Get-SummaryMetric $metrics 'login_duration' 'p(95)' 0)
+                $loginP99 = [double](Get-SummaryMetric $metrics 'login_duration' 'p(99)' 0)
+                $queueP95 = [double](Get-SummaryMetric $metrics 'queue_wait_duration' 'p(95)' 0)
+                $authP95 = [double](Get-SummaryMetric $metrics 'auth_duration' 'p(95)' 0)
+            }
+
+            # Fallback: if the custom metrics are not present in summary-export,
+            # parse the machine-readable values printed by the K6 script.
+            if ($queueReady -eq 0 -and $authSuccess -eq 0 -and (Test-Path $console)) {
+                $text = Get-Content $console -Raw
+                $patterns = @{
+                    loginSuccessRate = 'LOGIN SUCCESS RATE\s*:\s*([0-9.,]+)%'
+                    httpFailedRate = 'HTTP FAILED RATE\s*:\s*([0-9.,]+)%'
+                    queueReady = 'QUEUE READY\s*:\s*(\d+)'
+                    queueExpired = 'QUEUE EXPIRED\s*:\s*(\d+)'
+                    authSuccess = 'AUTH SUCCESS\s*:\s*(\d+)'
+                    authFailure = 'AUTH FAILURE\s*:\s*(\d+)'
+                    queueP95 = 'QUEUE WAIT P95\s*:\s*([0-9.,]+)\s*ms'
+                    authP95 = 'AUTH P95\s*:\s*([0-9.,]+)\s*ms'
+                    loginP95 = 'LOGIN P95\s*:\s*([0-9.,]+)\s*ms'
+                    loginP99 = 'LOGIN P99\s*:\s*([0-9.,]+)\s*ms'
+                }
+
+                $cultureInvariant = [System.Globalization.CultureInfo]::InvariantCulture
+                foreach ($key in $patterns.Keys) {
+                    $match = [regex]::Match($text, $patterns[$key], [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                    if (-not $match.Success) { continue }
+                    $value = $match.Groups[1].Value.Replace(',', '.')
+                    switch ($key) {
+                        'loginSuccessRate' { $loginSuccessRate = [double]$value / 100 }
+                        'httpFailedRate' { $httpFailedRate = [double]$value / 100 }
+                        'queueReady' { $queueReady = [int]$value }
+                        'queueExpired' { $queueExpired = [int]$value }
+                        'authSuccess' { $authSuccess = [int]$value }
+                        'authFailure' { $authFailure = [int]$value }
+                        'queueP95' { $queueP95 = [double]$value }
+                        'authP95' { $authP95 = [double]$value }
+                        'loginP95' { $loginP95 = [double]$value }
+                        'loginP99' { $loginP99 = [double]$value }
                     }
-                }
-
-                $queueMetric = Get-ValueOrDefault $metrics 'queue_wait_duration' $null
-                if ($null -ne $queueMetric) {
-                    $values = Get-ValueOrDefault $queueMetric 'values' $null
-                    if ($null -ne $values) { $queueP95 = [double](Get-ValueOrDefault $values 'p(95)' 0) }
-                }
-
-                $authMetric = Get-ValueOrDefault $metrics 'auth_duration' $null
-                if ($null -ne $authMetric) {
-                    $values = Get-ValueOrDefault $authMetric 'values' $null
-                    if ($null -ne $values) { $authP95 = [double](Get-ValueOrDefault $values 'p(95)' 0) }
                 }
             }
         } catch {
@@ -142,7 +194,7 @@ foreach ($vu in $vus) {
         report_dir = $dir
     }
 
-    Write-Host "[RESULT] VU=$vu exit=$k6Exit success_rate=$([math]::Round($loginSuccessRate * 100, 2))% queue_ready=$queueReady queue_expired=$queueExpired queue_p95=${queueP95}ms auth_p95=${authP95}ms login_p95=${loginP95}ms login_p99=${loginP99}ms"
+    Write-Host "[RESULT] VU=$vu exit=$k6Exit success_rate=$([math]::Round($loginSuccessRate * 100, 2))% queue_ready=$queueReady queue_expired=$queueExpired auth_success=$authSuccess auth_failure=$authFailure queue_p95=${queueP95}ms auth_p95=${authP95}ms login_p95=${loginP95}ms login_p99=${loginP99}ms"
 }
 
 $csv = Join-Path $reportRoot 'waiting-room-summary.csv'
