@@ -13,6 +13,11 @@ $routes->post('auth', 'Auth::auth');
 $routes->post('benchmark/password-verify', 'Auth::benchmarkPasswordVerify');
 $routes->get('logout', 'Auth::logout');
 
+// Login admission control. These endpoints intentionally stay public so
+// clients can queue before the expensive /auth request reaches PHP-FPM.
+$routes->post('waiting-room/enter', 'WaitingRoom::enter');
+$routes->get('waiting-room/status', 'WaitingRoom::status');
+
 // Dashboard Utama (filter 'auth' standar)
 $routes->get('dashboard', 'Dashboard::index', ['filter' => 'auth']);
 
