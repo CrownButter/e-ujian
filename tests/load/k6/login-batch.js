@@ -37,15 +37,16 @@ const loginSuccessRate = new Rate('login_success_rate');
 const loginDuration = new Trend('login_duration', true);
 const loginPageDuration = new Trend('login_page_duration', true);
 const authDuration = new Trend('auth_duration', true);
-const waitingDuration = new Trend('batch_waiting_duration', true);
+const batchWaitingDuration = new Trend('batch_waiting_duration', true);
 
 export const options = {
   scenarios: {
     batch_login: {
-      executor: 'shared-iterations',
+      executor: 'per-vu-iterations',
       vus: TOTAL_USERS,
-      iterations: TOTAL_USERS,
+      iterations: 1,
       maxDuration: `${Math.max(120, Math.ceil((TOTAL_USERS / BATCH_SIZE) * BATCH_INTERVAL_SECONDS) + 120)}s`,
+      gracefulStop: '30s',
     },
   },
   thresholds: {
@@ -73,8 +74,10 @@ function accountForVU() {
 function waitForBatch() {
   const batchNumber = Math.floor((__VU - 1) / BATCH_SIZE);
   const waitSeconds = batchNumber * BATCH_INTERVAL_SECONDS;
-  if (waitSeconds > 0) sleep(waitSeconds);
-  waitingDuration.add(waitSeconds * 1000);
+  if (waitSeconds > 0) {
+    sleep(waitSeconds);
+  }
+  batchWaitingDuration.add(waitSeconds * 1000);
   return batchNumber + 1;
 }
 
@@ -151,7 +154,7 @@ export function handleSummary(data) {
       batch_interval_seconds: BATCH_INTERVAL_SECONDS,
       batch_count: Math.ceil(TOTAL_USERS / BATCH_SIZE),
       account_range: `001-${String(TOTAL_USERS).padStart(3, '0')}`,
-      executor: 'shared-iterations',
+      executor: 'per-vu-iterations',
       generated_at: new Date().toISOString(),
     },
     requests: {
@@ -172,7 +175,7 @@ export function handleSummary(data) {
   };
 
   return {
-    stdout: `\nE-UJIAN K6 BATCH LOGIN TEST\n===========================\nBASE_URL          : ${BASE_URL}\nTOTAL USERS       : ${TOTAL_USERS}\nBATCH SIZE        : ${BATCH_SIZE}\nBATCH INTERVAL    : ${BATCH_INTERVAL_SECONDS}s\nBATCH COUNT       : ${Math.ceil(TOTAL_USERS / BATCH_SIZE)}\nACCOUNT RANGE     : 001-${String(TOTAL_USERS).padStart(3, '0')}\nEXECUTOR          : shared-iterations\nGET /login        : ${attempts}\nCSRF SUCCESS      : ${csrfOk}\nCSRF FAILURE      : ${csrfBad}\nPOST /auth        : ${authTry}\nAUTH SUCCESS      : ${success}\nAUTH FAILURE      : ${failure}\nTOTAL HTTP REQ    : ${attempts + authTry}\nSUCCESS RATE      : ${(rate * 100).toFixed(2)}%\n`,
+    stdout: `\nE-UJIAN K6 BATCH LOGIN TEST\n===========================\nBASE_URL          : ${BASE_URL}\nTOTAL USERS       : ${TOTAL_USERS}\nBATCH SIZE        : ${BATCH_SIZE}\nBATCH INTERVAL    : ${BATCH_INTERVAL_SECONDS}s\nBATCH COUNT       : ${Math.ceil(TOTAL_USERS / BATCH_SIZE)}\nACCOUNT RANGE     : 001-${String(TOTAL_USERS).padStart(3, '0')}\nEXECUTOR          : per-vu-iterations\nGET /login        : ${attempts}\nCSRF SUCCESS      : ${csrfOk}\nCSRF FAILURE      : ${csrfBad}\nPOST /auth        : ${authTry}\nAUTH SUCCESS      : ${success}\nAUTH FAILURE      : ${failure}\nTOTAL HTTP REQ    : ${attempts + authTry}\nSUCCESS RATE      : ${(rate * 100).toFixed(2)}%\n`,
     [__ENV.K6_SUMMARY_FILE || 'summary.json']: JSON.stringify(report, null, 2),
   };
 }
