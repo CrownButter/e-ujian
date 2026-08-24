@@ -6,19 +6,41 @@ class Auth extends BaseController
 {
     protected $helpers = ['url', 'form'];
 
+    private function timingEnabled(): bool
+    {
+        return ENVIRONMENT === 'development'
+            && filter_var(env('AUTH_TIMING_ENABLED', false), FILTER_VALIDATE_BOOLEAN);
+    }
+
     public function login()
     {
+        $timingStart = hrtime(true);
         session();
+        $sessionMs = round((hrtime(true) - $timingStart) / 1_000_000, 3);
+
         $data = [
             'title' => 'Login',
             'validation' => \Config\Services::validation()
         ];
-        return view('auth/login', $data);
+
+        $response = response()->setBody(view('auth/login', $data));
+
+        if ($this->timingEnabled()) {
+            $totalMs = round((hrtime(true) - $timingStart) / 1_000_000, 3);
+            log_message('info', 'LOGIN_PAGE_TIMING total={total}ms session={session}ms username={username}', [
+                'total' => $totalMs,
+                'session' => $sessionMs,
+                'username' => (string) $this->request->getGet('username'),
+            ]);
+        }
+
+        return $response;
     }
 
     public function auth()
     {
         $authStart = hrtime(true);
+        $timingEnabled = $this->timingEnabled();
 
         $validation = $this->validate([
             'username' => [
@@ -57,13 +79,15 @@ class Auth extends BaseController
 
         if (!$user || !$passwordValid) {
             $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
-            log_message('info', 'AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms', [
-                'username' => $username,
-                'total' => $authMs,
-                'validation' => $validationMs,
-                'db' => $dbMs,
-                'password' => $passwordMs,
-            ]);
+            if ($timingEnabled) {
+                log_message('info', 'AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms', [
+                    'username' => $username,
+                    'total' => $authMs,
+                    'validation' => $validationMs,
+                    'db' => $dbMs,
+                    'password' => $passwordMs,
+                ]);
+            }
 
             session()->setFlashdata('msg', 'Username atau Password salah');
             return redirect()->to('/login');
@@ -91,14 +115,16 @@ class Auth extends BaseController
 
         if (!$profile) {
             $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
-            log_message('info', 'AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms profile={profile}ms', [
-                'username' => $username,
-                'total' => $authMs,
-                'validation' => $validationMs,
-                'db' => $dbMs,
-                'password' => $passwordMs,
-                'profile' => $profileMs,
-            ]);
+            if ($timingEnabled) {
+                log_message('info', 'AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms profile={profile}ms', [
+                    'username' => $username,
+                    'total' => $authMs,
+                    'validation' => $validationMs,
+                    'db' => $dbMs,
+                    'password' => $passwordMs,
+                    'profile' => $profileMs,
+                ]);
+            }
 
             session()->setFlashdata('msg', 'Data pengguna tidak ditemukan');
             return redirect()->to('/login');
@@ -114,10 +140,6 @@ class Auth extends BaseController
         $nama_batalyon = '';
         $unitMs = 0.0;
 
-        // Unit membership is already represented by the authenticated profile
-        // for students. For staff, perform only the single role-specific lookup
-        // that is actually required by the session. Avoid OR predicates here:
-        // they make index selection less predictable under concurrent load.
         $unitTableByRole = [
             4 => ['table' => 'pleton',   'col' => 'danton_id', 'nameCol' => 'nama_pleton',   'var' => 'nama_pleton'],
             5 => ['table' => 'kompi',    'col' => 'danki_id',  'nameCol' => 'nama_kompi',    'var' => 'nama_kompi'],
@@ -129,9 +151,6 @@ class Auth extends BaseController
         if (isset($unitTableByRole[$roleId]) && !empty($profile['pegawai_id'])) {
             $u = $unitTableByRole[$roleId];
 
-            // Prefer the indexed numeric foreign-key value first. The existing
-            // schema exposes pegawai.id as the stable FK target. Only fall back
-            // to nomor_induk when the first lookup does not find a row.
             $row = $db->table($u['table'])
                 ->select($u['nameCol'])
                 ->where($u['col'], (int) $profile['pegawai_id'])
@@ -175,16 +194,18 @@ class Auth extends BaseController
         $sessionMs = round((hrtime(true) - $sessionStart) / 1_000_000, 3);
         $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
 
-        log_message('info', 'AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms profile={profile}ms unit={unit}ms session={session}ms', [
-            'username' => $username,
-            'total' => $authMs,
-            'validation' => $validationMs,
-            'db' => $dbMs,
-            'password' => $passwordMs,
-            'profile' => $profileMs,
-            'unit' => $unitMs,
-            'session' => $sessionMs,
-        ]);
+        if ($timingEnabled) {
+            log_message('info', 'AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms profile={profile}ms unit={unit}ms session={session}ms', [
+                'username' => $username,
+                'total' => $authMs,
+                'validation' => $validationMs,
+                'db' => $dbMs,
+                'password' => $passwordMs,
+                'profile' => $profileMs,
+                'unit' => $unitMs,
+                'session' => $sessionMs,
+            ]);
+        }
 
         if ($roleId === 7) {
             return redirect()->to('/siswa/users/profil');
