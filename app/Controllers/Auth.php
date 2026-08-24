@@ -23,14 +23,13 @@ class Auth extends BaseController
             'validation' => \Config\Services::validation()
         ];
 
-        $response = response()->setBody(view('auth/login', $data));
+        $response = $this->response->setBody(view('auth/login', $data));
 
         if ($this->timingEnabled()) {
             $totalMs = round((hrtime(true) - $timingStart) / 1_000_000, 3);
-            log_message('info', 'LOGIN_PAGE_TIMING total={total}ms session={session}ms username={username}', [
+            log_message('info', 'LOGIN_PAGE_TIMING total={total}ms session={session}ms', [
                 'total' => $totalMs,
                 'session' => $sessionMs,
-                'username' => (string) $this->request->getGet('username'),
             ]);
         }
 
