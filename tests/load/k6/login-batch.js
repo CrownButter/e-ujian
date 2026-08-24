@@ -73,9 +73,7 @@ function accountForVU() {
 function waitForBatch() {
   const batchNumber = Math.floor((__VU - 1) / BATCH_SIZE);
   const waitSeconds = batchNumber * BATCH_INTERVAL_SECONDS;
-  if (waitSeconds > 0) {
-    sleep(waitSeconds);
-  }
+  if (waitSeconds > 0) sleep(waitSeconds);
   waitingDuration.add(waitSeconds * 1000);
   return batchNumber + 1;
 }
