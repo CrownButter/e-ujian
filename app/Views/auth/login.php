@@ -15,13 +15,8 @@
     <!-- Theme style -->
     <link rel="stylesheet" href="<?= base_url('assets/'); ?>/dist/css/adminlte.min.css">
 
-    <!-- Custom CSS untuk Tampilan Background Image & Form Login -->
     <style>
         body.login-page {
-            /* 
-              Pengaturan Background Image + Overlay Transparan 
-              Ganti 'assets/dist/img/bg-sepolwan.jpg' sesuai dengan nama/lokasi file gambar Anda.
-            */
             background: linear-gradient(rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.55)),
                 url("<?= base_url('assets/dist/img/background.png'); ?>") no-repeat center center fixed;
             background-size: cover;
@@ -38,9 +33,7 @@
             box-shadow: 0 15px 35px rgba(0, 0, 0, 0.3);
             overflow: hidden;
             background: rgba(255, 255, 255, 0.95);
-            /* Sedikit transparan modern */
             backdrop-filter: blur(5px);
-            /* Efek blur halus di belakang card */
         }
 
         .card-header {
@@ -73,7 +66,6 @@
             border-bottom-right-radius: 6px;
         }
 
-        /* Styling Tombol Sign In */
         .btn-info {
             background-color: #17a2b8;
             border-color: #17a2b8;
@@ -94,7 +86,6 @@
             color: #555;
         }
 
-        /* Styling Link Lupa Password */
         .login-box a.forgot-link {
             color: #17a2b8;
             font-size: 0.9rem;
@@ -107,7 +98,26 @@
             text-decoration: underline;
         }
 
-        /* Responsif untuk layar HP */
+        #waitingRoomBox {
+            display: none;
+            border: 1px solid #bee5eb;
+            background: #f0fbfd;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 15px;
+        }
+
+        #waitingRoomBox .waiting-title {
+            font-weight: 700;
+            color: #117a8b;
+        }
+
+        #waitingRoomPosition {
+            font-size: 1.35rem;
+            font-weight: 700;
+            color: #17a2b8;
+        }
+
         @media (max-width: 576px) {
             .login-box {
                 width: 90%;
@@ -127,7 +137,6 @@
             <div class="card-body">
                 <p class="login-box-msg">Sign in to start your session</p>
 
-                <!-- Alert Flashdata Error Login -->
                 <?php if (session()->getFlashdata('msg')): ?>
                     <div class="alert alert-danger text-center p-2 mb-3" style="font-size: 90%; border-radius: 6px;">
                         <i class="fas fa-exclamation-triangle mr-1"></i>
@@ -135,8 +144,21 @@
                     </div>
                 <?php endif; ?>
 
-                <form action="<?= base_url('auth') ?>" method="post">
+                <div id="waitingRoomBox" role="status" aria-live="polite">
+                    <div class="waiting-title mb-1">
+                        <i class="fas fa-users mr-1"></i> Login Queue
+                    </div>
+                    <div id="waitingRoomMessage" class="small text-muted mb-1">
+                        Mengatur antrean login...
+                    </div>
+                    <div>
+                        Posisi: <span id="waitingRoomPosition">-</span>
+                    </div>
+                </div>
+
+                <form id="loginForm" action="<?= base_url('auth') ?>" method="post">
                     <?= csrf_field() ?>
+                    <input type="hidden" name="waiting_room_ticket" id="waitingRoomTicket" value="">
 
                     <div class="mb-3">
                         <div class="input-group">
@@ -178,7 +200,7 @@
                             </div>
                         </div>
                         <div class="col-4">
-                            <button type="submit" class="btn btn-info btn-block">Sign In</button>
+                            <button id="loginSubmit" type="submit" class="btn btn-info btn-block">Sign In</button>
                         </div>
                     </div>
                 </form>
@@ -192,7 +214,6 @@
         </div>
     </div>
 
-    <!-- Modal Lupa Password -->
     <div class="modal fade" id="lupaPasswordModal" tabindex="-1" role="dialog" aria-labelledby="lupaPasswordModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered" role="document">
             <div class="modal-content" style="border-radius: 10px;">
@@ -216,12 +237,136 @@
         </div>
     </div>
 
-    <!-- jQuery -->
     <script src="<?= base_url('assets/'); ?>/plugins/jquery/jquery.min.js"></script>
-    <!-- Bootstrap 4 -->
     <script src="<?= base_url('assets/'); ?>/plugins/bootstrap/js/bootstrap.bundle.min.js"></script>
-    <!-- AdminLTE App -->
     <script src="<?= base_url('assets/'); ?>/dist/js/adminlte.min.js"></script>
+
+    <script>
+        (function () {
+            const form = document.getElementById('loginForm');
+            const submitButton = document.getElementById('loginSubmit');
+            const ticketInput = document.getElementById('waitingRoomTicket');
+            const waitingBox = document.getElementById('waitingRoomBox');
+            const waitingMessage = document.getElementById('waitingRoomMessage');
+            const waitingPosition = document.getElementById('waitingRoomPosition');
+            const csrfInput = form.querySelector('input[name="<?= csrf_token() ?>"]');
+            let pollingTimer = null;
+            let submitting = false;
+
+            function showWaiting(message, position) {
+                waitingBox.style.display = 'block';
+                waitingMessage.textContent = message;
+                waitingPosition.textContent = position > 0 ? position : '-';
+            }
+
+            function stopPolling() {
+                if (pollingTimer !== null) {
+                    clearTimeout(pollingTimer);
+                    pollingTimer = null;
+                }
+            }
+
+            async function poll(ticket) {
+                try {
+                    const response = await fetch(
+                        '<?= base_url('waiting-room/status'); ?>?ticket=' + encodeURIComponent(ticket),
+                        { cache: 'no-store', credentials: 'same-origin' }
+                    );
+                    const data = await response.json();
+
+                    if (data.status === 'ready') {
+                        stopPolling();
+                        showWaiting('Slot login tersedia. Memproses login...', 0);
+                        submitting = true;
+                        form.submit();
+                        return;
+                    }
+
+                    if (data.expired) {
+                        stopPolling();
+                        ticketInput.value = '';
+                        submitButton.disabled = false;
+                        submitButton.textContent = 'Sign In';
+                        showWaiting(data.message || 'Antrean kedaluwarsa. Silakan klik Sign In lagi.', 0);
+                        return;
+                    }
+
+                    showWaiting(
+                        'Server sedang memproses login secara bertahap. Mohon tunggu.',
+                        Number(data.position || 0)
+                    );
+
+                    pollingTimer = setTimeout(function () {
+                        poll(ticket);
+                    }, Math.max(1000, Number(data.retry_after || 2) * 1000));
+                } catch (error) {
+                    showWaiting('Koneksi antrean terganggu. Mencoba kembali...', 0);
+                    pollingTimer = setTimeout(function () {
+                        poll(ticket);
+                    }, 3000);
+                }
+            }
+
+            form.addEventListener('submit', async function (event) {
+                if (submitting) {
+                    return;
+                }
+
+                event.preventDefault();
+                stopPolling();
+
+                submitButton.disabled = true;
+                submitButton.textContent = 'Menunggu...';
+                showWaiting('Mengambil slot login...', 0);
+
+                try {
+                    const body = new URLSearchParams();
+                    if (csrfInput) {
+                        body.append(csrfInput.name, csrfInput.value);
+                    }
+
+                    const response = await fetch('<?= base_url('waiting-room/enter'); ?>', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                        },
+                        body: body.toString(),
+                        credentials: 'same-origin',
+                        cache: 'no-store'
+                    });
+
+                    const data = await response.json();
+
+                    if (!response.ok || !data.ok) {
+                        throw new Error(data.message || 'Waiting room tidak tersedia.');
+                    }
+
+                    if (csrfInput && data.csrf_token) {
+                        csrfInput.value = data.csrf_token;
+                    }
+
+                    ticketInput.value = data.ticket;
+
+                    if (data.status === 'ready') {
+                        showWaiting('Slot login tersedia. Memproses login...', 0);
+                        submitting = true;
+                        form.submit();
+                        return;
+                    }
+
+                    showWaiting(
+                        'Server sedang memproses login secara bertahap. Mohon tunggu.',
+                        Number(data.position || 0)
+                    );
+                    poll(data.ticket);
+                } catch (error) {
+                    submitButton.disabled = false;
+                    submitButton.textContent = 'Sign In';
+                    showWaiting(error.message || 'Waiting room tidak tersedia. Silakan coba lagi.', 0);
+                }
+            });
+        })();
+    </script>
 </body>
 
 </html>
