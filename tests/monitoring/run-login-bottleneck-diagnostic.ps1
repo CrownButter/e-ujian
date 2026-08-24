@@ -26,21 +26,15 @@ function Invoke-Native([string]$FilePath, [string[]]$NativeArgs) {
     try {
         $output = & $FilePath @NativeArgs 2>&1
         $exitCode = $LASTEXITCODE
-        return [pscustomobject]@{
-            Output = @($output)
-            ExitCode = $exitCode
-        }
+        return [pscustomobject]@{ Output = @($output); ExitCode = $exitCode }
     }
-    finally {
-        $ErrorActionPreference = $previousPreference
-    }
+    finally { $ErrorActionPreference = $previousPreference }
 }
 
 function Run-Docker([string[]]$DockerArgs, [switch]$AllowNonZero) {
     $result = Invoke-Native -FilePath 'docker' -NativeArgs $DockerArgs
     if (-not $AllowNonZero -and $result.ExitCode -ne 0) {
-        $rendered = ($DockerArgs -join ' ')
-        throw "Docker command failed (exit=$($result.ExitCode)): docker $rendered`n$($result.Output -join "`n")"
+        throw "Docker command failed (exit=$($result.ExitCode)): docker $($DockerArgs -join ' ')`n$($result.Output -join "`n")"
     }
     return $result
 }
@@ -53,39 +47,28 @@ function Sample-DockerStats([string]$Path) {
     $result = Run-Docker @('stats','--no-stream','--format','{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}|{{.NetIO}}|{{.BlockIO}}|{{.PIDs}}')
     $ts = (Get-Date).ToString('o')
     foreach ($line in $result.Output) {
-        if ([string]::IsNullOrWhiteSpace([string]$line)) { continue }
-        Add-Content -Path $Path -Value ($ts + '|' + [string]$line) -Encoding UTF8
+        if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|$line" -Encoding UTF8 }
     }
 }
 
 function Sample-PhpFpm([string]$Path) {
     $ts = (Get-Date).ToString('o')
     $config = Run-Docker @('exec',$PhpContainer,'sh','-c','grep -R "^[[:space:]]*pm\.[a-z_]*[[:space:]]*=" /usr/local/etc/php-fpm.d /usr/local/etc/php-fpm.conf 2>/dev/null || true')
-    foreach ($line in $config.Output) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|CONFIG|$line" -Encoding UTF8 }
-    }
-
+    foreach ($line in $config.Output) { if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|CONFIG|$line" -Encoding UTF8 } }
     $proc = Run-Docker @('exec',$PhpContainer,'sh','-c','ps -eo pid,stat,cmd 2>/dev/null | grep "[p]hp-fpm" || true')
     $count = @($proc.Output | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count
     Add-Content $Path "$ts|PROCESS_COUNT|$count" -Encoding UTF8
-    foreach ($line in $proc.Output) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|PROCESS|$line" -Encoding UTF8 }
-    }
+    foreach ($line in $proc.Output) { if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|PROCESS|$line" -Encoding UTF8 } }
 }
 
 function Sample-MySql([string]$Path) {
     $ts = (Get-Date).ToString('o')
     $sql = "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected','Threads_running','Threads_created','Threads_cached','Connections','Max_used_connections','Slow_queries','Queries','Questions');"
     $result = Run-Docker @('exec',$MysqlContainer,'mysql','-uroot','-plocal_root_password','euji_ujian_db','-Nse',$sql)
-    foreach ($line in $result.Output) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|STATUS|$line" -Encoding UTF8 }
-    }
-
+    foreach ($line in $result.Output) { if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|STATUS|$line" -Encoding UTF8 } }
     $process = Run-Docker @('exec',$MysqlContainer,'mysql','-uroot','-plocal_root_password','euji_ujian_db','-e','SHOW PROCESSLIST;')
     Add-Content $Path "$ts|PROCESSLIST_BEGIN" -Encoding UTF8
-    foreach ($line in $process.Output) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|PROCESSLIST|$line" -Encoding UTF8 }
-    }
+    foreach ($line in $process.Output) { if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|PROCESSLIST|$line" -Encoding UTF8 } }
 }
 
 function Sample-Nginx([string]$Path) {
@@ -94,22 +77,15 @@ function Sample-Nginx([string]$Path) {
         $r = Invoke-WebRequest -Uri ($BaseUrl.TrimEnd('/') + '/nginx_status') -UseBasicParsing -TimeoutSec 2
         Add-Content $Path "$ts|STATUS|HTTP $($r.StatusCode)|$($r.Content -replace "`r|`n",' ')" -Encoding UTF8
     }
-    catch {
-        Add-Content $Path "$ts|STATUS|UNAVAILABLE|$($_.Exception.Message)" -Encoding UTF8
-    }
-
+    catch { Add-Content $Path "$ts|STATUS|UNAVAILABLE|$($_.Exception.Message)" -Encoding UTF8 }
     $proc = Run-Docker @('exec',$NginxContainer,'sh','-c','ps -eo pid,stat,cmd 2>/dev/null | grep "[n]ginx" || true')
-    foreach ($line in $proc.Output) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|PROCESS|$line" -Encoding UTF8 }
-    }
+    foreach ($line in $proc.Output) { if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|PROCESS|$line" -Encoding UTF8 } }
 }
 
 function Sample-AuthTiming([string]$Path) {
     $result = Run-Docker @('exec',$PhpContainer,'sh','-c','if [ -f /var/www/html/writable/logs/auth-timing.csv ]; then tail -n 200 /var/www/html/writable/logs/auth-timing.csv; fi')
     $ts = (Get-Date).ToString('o')
-    foreach ($line in $result.Output) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|$line" -Encoding UTF8 }
-    }
+    foreach ($line in $result.Output) { if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Add-Content $Path "$ts|$line" -Encoding UTF8 } }
 }
 
 function Get-Metric([object]$Values, [string]$Name) {
@@ -119,40 +95,32 @@ function Get-Metric([object]$Values, [string]$Name) {
     try { return [double]$property.Value } catch { return 0.0 }
 }
 
-function Start-K6Process([string[]]$K6Args, [string]$StdOutFile, [string]$StdErrFile) {
-    # Windows PowerShell 5.1 does not expose ProcessStartInfo.ArgumentList.
-    # Use the classic Arguments property and quote each argument safely instead.
+function Get-PropertyValue([object]$Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Start-K6Process([string[]]$K6Args) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = 'k6'
     $quoted = foreach ($arg in $K6Args) {
-        if ($arg -match '[\s"]') {
-            '"' + ($arg -replace '(\\*)"','$1$1\"' -replace '(\\+)$','$1$1') + '"'
-        } else {
-            $arg
-        }
+        if ($arg -match '[\s"]') { '"' + ($arg -replace '(\\*)"','$1$1\"' -replace '(\\+)$','$1$1') + '"' } else { $arg }
     }
     $psi.Arguments = ($quoted -join ' ')
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
-
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
     [void]$process.Start()
-
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-
-    return [pscustomobject]@{
-        Process = $process
-        StdOutTask = $stdoutTask
-        StdErrTask = $stderrTask
-    }
+    return [pscustomobject]@{ Process = $process; StdOutTask = $process.StandardOutput.ReadToEndAsync(); StdErrTask = $process.StandardError.ReadToEndAsync() }
 }
 
 Write-Line '========================================================================'
-Write-Line 'E-UJIAN LOGIN BOTTLENECK DIAGNOSTIC V9.3'
+Write-Line 'E-UJIAN LOGIN BOTTLENECK DIAGNOSTIC V9.4'
 Write-Line '========================================================================'
 Write-Line "BASE_URL          : $BaseUrl"
 Write-Line "VUS matrix        : $($VuMatrix -join ', ')"
@@ -170,8 +138,7 @@ Write-Line '[CHECK] Docker containers'
 $containerResult = Run-Docker @('ps','--format','{{.Names}}|{{.Status}}|{{.Ports}}')
 $containerStatus = $containerResult.Output
 Save-Text (Join-Path $reportRoot 'docker-containers.txt') $containerStatus
-$required = @($PhpContainer,$MysqlContainer,$NginxContainer)
-foreach ($name in $required) {
+foreach ($name in @($PhpContainer,$MysqlContainer,$NginxContainer)) {
     if (-not (@($containerStatus) -match "^$([regex]::Escape($name))\|")) { throw "Container tidak ditemukan/running: $name" }
 }
 Write-Line '[OK] Required containers running.'
@@ -190,7 +157,6 @@ Sample-MySql (Join-Path $preflight 'mysql.txt')
 Sample-Nginx (Join-Path $preflight 'nginx.txt')
 
 $results = @()
-
 foreach ($vus in $VuMatrix) {
     $dir = Join-Path $reportRoot ('vu_{0:D3}' -f $vus)
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -202,6 +168,7 @@ foreach ($vus in $VuMatrix) {
     $k6Out = Join-Path $dir 'k6-output.txt'
     $k6Err = Join-Path $dir 'k6-error.txt'
     $summary = Join-Path $dir 'summary.json'
+    $nativeSummary = Join-Path $dir 'k6-native-summary.json'
 
     Write-Line ''
     Write-Line '========================================================================'
@@ -213,10 +180,9 @@ foreach ($vus in $VuMatrix) {
     $env:DURATION = "${DurationSeconds}s"
     $env:K6_SUMMARY_FILE = $summary
 
-    $k6Args = @('run','--summary-export',$summary,$K6Script)
+    $k6Args = @('run','--summary-export',$nativeSummary,$K6Script)
     Write-Line ('[K6] k6 ' + ($k6Args -join ' '))
-
-    $k6 = Start-K6Process -K6Args $k6Args -StdOutFile $k6Out -StdErrFile $k6Err
+    $k6 = Start-K6Process -K6Args $k6Args
     $p = $k6.Process
 
     while (-not $p.HasExited) {
@@ -240,18 +206,19 @@ foreach ($vus in $VuMatrix) {
         try { $summaryObj = Get-Content $summary -Raw | ConvertFrom-Json } catch { $summaryObj = $null }
     }
 
+    $customResult = Get-PropertyValue $summaryObj 'result'
     $loginSuccessRate = 0.0
     $httpFailedRate = 0.0
     $loginP95 = 0.0
     $loginP99 = 0.0
     $authP95 = 0.0
 
-    if ($summaryObj -and $summaryObj.result) {
-        $loginSuccessRate = Get-Metric $summaryObj.result 'login_success_rate'
-        $httpFailedRate = Get-Metric $summaryObj.result 'http_failed_rate'
-        $loginP95 = Get-Metric $summaryObj.result 'login_p95_ms'
-        $loginP99 = Get-Metric $summaryObj.result 'login_p99_ms'
-        $authP95 = Get-Metric $summaryObj.result 'auth_p95_ms'
+    if ($null -ne $customResult) {
+        $loginSuccessRate = Get-Metric $customResult 'login_success_rate'
+        $httpFailedRate = Get-Metric $customResult 'http_failed_rate'
+        $loginP95 = Get-Metric $customResult 'login_p95_ms'
+        $loginP99 = Get-Metric $customResult 'login_p99_ms'
+        $authP95 = Get-Metric $customResult 'auth_p95_ms'
     }
 
     $results += [pscustomobject]@{
@@ -271,33 +238,19 @@ foreach ($vus in $VuMatrix) {
 
 $csv = Join-Path $reportRoot 'bottleneck-summary.csv'
 $results | Export-Csv -Path $csv -NoTypeInformation -Encoding UTF8
-
 $md = Join-Path $reportRoot 'bottleneck-report.md'
-$lines = @()
-$lines += '# E-UJIAN Login Bottleneck Diagnostic V9.3'
+$lines = @('# E-UJIAN Login Bottleneck Diagnostic V9.4','','Generated: ' + (Get-Date -Format o),'','## Test matrix','','| VU | Login success | HTTP failed | Login p95 (ms) | Login p99 (ms) | Auth p95 (ms) | Exit |','|---:|---:|---:|---:|---:|---:|---:|')
+foreach ($x in $results) { $lines += ('| {0} | {1:P2} | {2:P2} | {3:N2} | {4:N2} | {5:N2} | {6} |' -f $x.vus,$x.login_success_rate,$x.http_failed_rate,$x.login_p95_ms,$x.login_p99_ms,$x.auth_p95_ms,$x.k6_exit_code) }
 $lines += ''
-$lines += "Generated: $(Get-Date -Format o)"
+$lines += '## Files'
 $lines += ''
-$lines += '## Test matrix'
-$lines += ''
-$lines += '| VU | Login success | HTTP failed | Login p95 (ms) | Login p99 (ms) | Auth p95 (ms) | Exit |'
-$lines += '|---:|---:|---:|---:|---:|---:|---:|'
-foreach ($x in $results) {
-    $lines += ('| {0} | {1:P2} | {2:P2} | {3:N2} | {4:N2} | {5:N2} | {6} |' -f $x.vus,$x.login_success_rate,$x.http_failed_rate,$x.login_p95_ms,$x.login_p99_ms,$x.auth_p95_ms,$x.k6_exit_code)
-}
-$lines += ''
-$lines += '## Interpretation guide'
-$lines += ''
-$lines += '- Native stderr warnings from Docker/MySQL are captured but do not abort the wrapper when the native process exits with code 0.'
-$lines += '- PHP-FPM: inspect `php-fpm.txt` for worker count and `pm.*` configuration.'
-$lines += '- MySQL: inspect `mysql.txt` for Threads_connected, Threads_running, Max_used_connections, Slow_queries and process list.'
-$lines += '- Nginx: inspect `nginx.txt`; unavailable status is recorded rather than inferred.'
-$lines += '- Docker: inspect `docker-stats.txt` for CPU, memory, network I/O, block I/O and PID growth.'
-$lines += '- Application: `auth-timing.txt` contains the existing Auth.php timing fields.'
-$lines += ''
-$lines += '## Conclusion'
-$lines += ''
-$lines += 'No application or infrastructure tuning is performed by this diagnostic. Use the correlated samples to identify the first saturated layer before making another optimization.'
+$lines += '- summary.json: custom handleSummary result.'
+$lines += '- k6-native-summary.json: native k6 --summary-export result.'
+$lines += '- docker-stats.txt: Docker CPU/memory/network/block I/O/PIDs.'
+$lines += '- php-fpm.txt: PHP-FPM configuration and process count.'
+$lines += '- mysql.txt: MySQL global status and process list.'
+$lines += '- nginx.txt: nginx status endpoint and process information.'
+$lines += '- auth-timing.txt: existing application authentication timing log.'
 $lines | Set-Content -Path $md -Encoding UTF8
 
 Write-Line ''
