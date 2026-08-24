@@ -14,8 +14,45 @@ class Auth extends BaseController
 
     private function logTiming(string $message, array $context = []): void
     {
-        if ($this->timingEnabled()) {
-            log_message('info', $message, $context);
+        if (!$this->timingEnabled()) {
+            return;
+        }
+
+        log_message('info', $message, $context);
+    }
+
+    private function writeAuthTiming(array $row): void
+    {
+        if (!$this->timingEnabled()) {
+            return;
+        }
+
+        $directory = WRITEPATH . 'logs';
+        if (!is_dir($directory)) {
+            @mkdir($directory, 0775, true);
+        }
+
+        $path = $directory . DIRECTORY_SEPARATOR . 'auth-timing.csv';
+        $handle = @fopen($path, 'ab');
+        if ($handle === false) {
+            return;
+        }
+
+        try {
+            if (flock($handle, LOCK_EX)) {
+                if (filesize($path) === 0) {
+                    fputcsv($handle, [
+                        'timestamp', 'username', 'result', 'validation_ms',
+                        'request_ms', 'db_ms', 'password_ms', 'unit_ms',
+                        'unit_queries', 'session_ms', 'total_ms'
+                    ]);
+                }
+                fputcsv($handle, $row);
+                fflush($handle);
+                flock($handle, LOCK_UN);
+            }
+        } finally {
+            fclose($handle);
         }
     }
 
@@ -56,6 +93,7 @@ class Auth extends BaseController
     public function auth()
     {
         $authStart = hrtime(true);
+        $timestamp = date('c');
 
         $validationStart = hrtime(true);
         $validation = $this->validate([
@@ -74,6 +112,10 @@ class Auth extends BaseController
 
         if (!$validation) {
             $totalMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+            $this->writeAuthTiming([
+                $timestamp, '', 'VALIDATION_FAIL', $validationMs,
+                0, 0, 0, 0, 0, 0, $totalMs
+            ]);
             $this->logTiming('AUTH_TIMING result=VALIDATION_FAIL total={total}ms validation={validation}ms', [
                 'total' => $totalMs,
                 'validation' => $validationMs,
@@ -88,8 +130,6 @@ class Auth extends BaseController
 
         $db = \Config\Database::connect();
 
-        // Authentication only needs the identity and password hash. Keep the
-        // hot authentication query independent from profile/unit joins.
         $dbStart = hrtime(true);
         $user = $db->table('users')
             ->select('id, username, password, role_id')
@@ -109,6 +149,10 @@ class Auth extends BaseController
             $flashMs = round((hrtime(true) - $flashStart) / 1_000_000, 3);
 
             $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+            $this->writeAuthTiming([
+                $timestamp, $username, 'FAIL', $validationMs,
+                $requestMs, $dbMs, $passwordMs, 0, 0, $flashMs, $authMs
+            ]);
             $this->logTiming('AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms request={request}ms db={db}ms password={password}ms flash={flash}ms', [
                 'username' => $username,
                 'total' => $authMs,
@@ -131,9 +175,6 @@ class Auth extends BaseController
         $unitQueryCount = 0;
         $unitStart = hrtime(true);
 
-        // Load only the small amount of profile/unit data required to build
-        // the existing session. This happens after password verification so
-        // the authentication query itself remains minimal.
         if ($roleId === 7) {
             $profile = $db->table('siswa')
                 ->select('siswa.nama, siswa.pleton_id, pleton.nama_pleton')
@@ -221,6 +262,11 @@ class Auth extends BaseController
         $sessionMs = round((hrtime(true) - $sessionStart) / 1_000_000, 3);
 
         $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+        $this->writeAuthTiming([
+            $timestamp, $username, 'SUCCESS', $validationMs,
+            $requestMs, $dbMs, $passwordMs, $unitMs,
+            $unitQueryCount, $sessionMs, $authMs
+        ]);
         $this->logTiming('AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms request={request}ms db={db}ms password={password}ms unit={unit}ms unit_queries={unit_queries} session={session}ms', [
             'username' => $username,
             'total' => $authMs,
@@ -239,25 +285,17 @@ class Auth extends BaseController
         return redirect()->to('/dashboard');
     }
 
-    /**
-     * Development-only benchmark endpoint for isolating password_verify().
-     * Never expose this endpoint in production.
-     */
     public function benchmarkPasswordVerify()
     {
         if (ENVIRONMENT !== 'development') {
-            return $this->response->setStatusCode(404)->setJSON([
-                'error' => 'Not available'
-            ]);
+            return $this->response->setStatusCode(404)->setJSON(['error' => 'Not available']);
         }
 
         $password = $this->request->getPost('password');
         $hash = $this->request->getPost('hash');
 
         if (!$password || !$hash) {
-            return $this->response->setStatusCode(400)->setJSON([
-                'error' => 'password and hash are required'
-            ]);
+            return $this->response->setStatusCode(400)->setJSON(['error' => 'password and hash are required']);
         }
 
         $start = hrtime(true);
