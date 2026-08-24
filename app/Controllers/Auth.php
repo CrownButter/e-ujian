@@ -56,7 +56,6 @@ class Auth extends BaseController
     public function auth()
     {
         $authStart = hrtime(true);
-        $timingEnabled = $this->timingEnabled();
 
         $validationStart = hrtime(true);
         $validation = $this->validate([
@@ -89,28 +88,22 @@ class Auth extends BaseController
 
         $db = \Config\Database::connect();
 
+        // Authentication only needs the identity and password hash. Keep the
+        // hot authentication query independent from profile/unit joins.
         $dbStart = hrtime(true);
-        $profile = $db->table('users')
-            ->select('users.id, users.username, users.password, users.role_id, '
-                . 'roles.nama_role, '
-                . 'pegawai.id as pegawai_id, pegawai.nama as nama_pegawai, '
-                . 'pegawai.nomor_induk as pegawai_nomor_induk, '
-                . 'siswa.nama as nama_siswa, siswa.pleton_id as siswa_pleton_id, '
-                . 'pleton_siswa.nama_pleton as siswa_nama_pleton')
-            ->join('roles', 'roles.id = users.role_id', 'left')
-            ->join('pegawai', 'pegawai.user_id = users.id', 'left')
-            ->join('siswa', 'siswa.user_id = users.id', 'left')
-            ->join('pleton as pleton_siswa', 'pleton_siswa.id = siswa.pleton_id', 'left')
-            ->where('users.username', $username)
+        $user = $db->table('users')
+            ->select('id, username, password, role_id')
+            ->where('username', $username)
+            ->limit(1)
             ->get()
             ->getRowArray();
         $dbMs = round((hrtime(true) - $dbStart) / 1_000_000, 3);
 
         $passwordStart = hrtime(true);
-        $passwordValid = $profile && password_verify($password, $profile['password']);
+        $passwordValid = $user && password_verify($password, $user['password']);
         $passwordMs = round((hrtime(true) - $passwordStart) / 1_000_000, 3);
 
-        if (!$profile || !$passwordValid) {
+        if (!$user || !$passwordValid) {
             $flashStart = hrtime(true);
             session()->setFlashdata('msg', 'Username atau Password salah');
             $flashMs = round((hrtime(true) - $flashStart) / 1_000_000, 3);
@@ -129,60 +122,94 @@ class Auth extends BaseController
             return redirect()->to('/login');
         }
 
-        $roleId = (int) $profile['role_id'];
-        $namaRole = $profile['nama_role'] ?? 'User';
-        $nama = ($roleId === 7)
-            ? ($profile['nama_siswa'] ?? 'User')
-            : ($profile['nama_pegawai'] ?? 'User');
-
+        $roleId = (int) $user['role_id'];
+        $namaRole = 'User';
+        $nama = 'User';
         $nama_pleton = '';
         $nama_kompi = '';
         $nama_batalyon = '';
-
-        $unitTableByRole = [
-            4 => ['table' => 'pleton',   'col' => 'danton_id', 'nameCol' => 'nama_pleton',   'var' => 'nama_pleton'],
-            5 => ['table' => 'kompi',    'col' => 'danki_id',  'nameCol' => 'nama_kompi',    'var' => 'nama_kompi'],
-            6 => ['table' => 'batalyon', 'col' => 'danyon_id', 'nameCol' => 'nama_batalyon', 'var' => 'nama_batalyon'],
-        ];
-
-        $unitStart = hrtime(true);
         $unitQueryCount = 0;
+        $unitStart = hrtime(true);
 
-        if (isset($unitTableByRole[$roleId]) && !empty($profile['pegawai_id'])) {
-            $u = $unitTableByRole[$roleId];
-
-            $unitQueryCount++;
-            $row = $db->table($u['table'])
-                ->select($u['nameCol'])
-                ->where($u['col'], (int) $profile['pegawai_id'])
+        // Load only the small amount of profile/unit data required to build
+        // the existing session. This happens after password verification so
+        // the authentication query itself remains minimal.
+        if ($roleId === 7) {
+            $profile = $db->table('siswa')
+                ->select('siswa.nama, siswa.pleton_id, pleton.nama_pleton')
+                ->join('pleton', 'pleton.id = siswa.pleton_id', 'left')
+                ->where('siswa.user_id', (int) $user['id'])
+                ->limit(1)
                 ->get()
-                ->getRow();
+                ->getRowArray();
+            $unitQueryCount++;
 
-            if (!$row && !empty($profile['pegawai_nomor_induk'])) {
-                $unitQueryCount++;
+            $nama = $profile['nama'] ?? 'User';
+            if (!empty($profile['nama_pleton'])) {
+                $nama_pleton = ' - ' . $profile['nama_pleton'];
+            }
+        } else {
+            $pegawai = $db->table('pegawai')
+                ->select('id, nama, nomor_induk')
+                ->where('user_id', (int) $user['id'])
+                ->limit(1)
+                ->get()
+                ->getRowArray();
+            $unitQueryCount++;
+
+            $nama = $pegawai['nama'] ?? 'User';
+
+            $unitTableByRole = [
+                4 => ['table' => 'pleton',   'col' => 'danton_id', 'nameCol' => 'nama_pleton',   'var' => 'nama_pleton'],
+                5 => ['table' => 'kompi',    'col' => 'danki_id',  'nameCol' => 'nama_kompi',    'var' => 'nama_kompi'],
+                6 => ['table' => 'batalyon', 'col' => 'danyon_id', 'nameCol' => 'nama_batalyon', 'var' => 'nama_batalyon'],
+            ];
+
+            if (isset($unitTableByRole[$roleId]) && $pegawai) {
+                $u = $unitTableByRole[$roleId];
+
                 $row = $db->table($u['table'])
                     ->select($u['nameCol'])
-                    ->where($u['col'], $profile['pegawai_nomor_induk'])
+                    ->where($u['col'], (int) $pegawai['id'])
+                    ->limit(1)
                     ->get()
                     ->getRow();
-            }
+                $unitQueryCount++;
 
-            if ($row) {
-                $value = $row->{$u['nameCol']};
-                if ($u['var'] === 'nama_pleton') $nama_pleton = ' - ' . $value;
-                if ($u['var'] === 'nama_kompi') $nama_kompi = ' - ' . $value;
-                if ($u['var'] === 'nama_batalyon') $nama_batalyon = ' - ' . $value;
+                if (!$row && !empty($pegawai['nomor_induk'])) {
+                    $row = $db->table($u['table'])
+                        ->select($u['nameCol'])
+                        ->where($u['col'], $pegawai['nomor_induk'])
+                        ->limit(1)
+                        ->get()
+                        ->getRow();
+                    $unitQueryCount++;
+                }
+
+                if ($row) {
+                    $value = $row->{$u['nameCol']};
+                    if ($u['var'] === 'nama_pleton') $nama_pleton = ' - ' . $value;
+                    if ($u['var'] === 'nama_kompi') $nama_kompi = ' - ' . $value;
+                    if ($u['var'] === 'nama_batalyon') $nama_batalyon = ' - ' . $value;
+                }
             }
-        } elseif ($roleId === 7 && !empty($profile['siswa_nama_pleton'])) {
-            $nama_pleton = ' - ' . $profile['siswa_nama_pleton'];
         }
 
         $unitMs = round((hrtime(true) - $unitStart) / 1_000_000, 3);
 
+        $role = $db->table('roles')
+            ->select('nama_role')
+            ->where('id', $roleId)
+            ->limit(1)
+            ->get()
+            ->getRowArray();
+        $unitQueryCount++;
+        $namaRole = $role['nama_role'] ?? 'User';
+
         $sessionStart = hrtime(true);
         session()->set([
-            'user_id'       => $profile['id'],
-            'username'      => $profile['username'],
+            'user_id'       => $user['id'],
+            'username'      => $user['username'],
             'role_id'       => $roleId,
             'nama_role'     => $namaRole,
             'nama_pleton'   => $nama_pleton,
