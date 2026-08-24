@@ -116,6 +116,7 @@ class WaitingRoom extends BaseController
             return $this->json(['ok' => false, 'message' => 'Waiting room sedang sibuk. Silakan coba lagi.'], 503);
         }
 
+        $result['csrf_token'] = csrf_hash();
         return $this->json(['ok' => true] + $result);
     }
 
