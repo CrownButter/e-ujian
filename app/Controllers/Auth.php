@@ -12,26 +12,43 @@ class Auth extends BaseController
             && filter_var(env('AUTH_TIMING_ENABLED', false), FILTER_VALIDATE_BOOLEAN);
     }
 
+    private function logTiming(string $message, array $context = []): void
+    {
+        if ($this->timingEnabled()) {
+            log_message('info', $message, $context);
+        }
+    }
+
     public function login()
     {
         $timingStart = hrtime(true);
+
+        $sessionStart = hrtime(true);
         session();
-        $sessionMs = round((hrtime(true) - $timingStart) / 1_000_000, 3);
+        $sessionMs = round((hrtime(true) - $sessionStart) / 1_000_000, 3);
 
-        $data = [
+        $validationStart = hrtime(true);
+        $validation = \Config\Services::validation();
+        $validationMs = round((hrtime(true) - $validationStart) / 1_000_000, 3);
+
+        $viewStart = hrtime(true);
+        $response = $this->response->setBody(view('auth/login', [
             'title' => 'Login',
-            'validation' => \Config\Services::validation()
-        ];
+            'validation' => $validation,
+        ]));
+        $viewMs = round((hrtime(true) - $viewStart) / 1_000_000, 3);
 
-        $response = $this->response->setBody(view('auth/login', $data));
+        $totalMs = round((hrtime(true) - $timingStart) / 1_000_000, 3);
 
-        if ($this->timingEnabled()) {
-            $totalMs = round((hrtime(true) - $timingStart) / 1_000_000, 3);
-            log_message('info', 'LOGIN_PAGE_TIMING total={total}ms session={session}ms', [
+        $this->logTiming(
+            'LOGIN_PAGE_TIMING total={total}ms session={session}ms validation={validation}ms view={view}ms',
+            [
                 'total' => $totalMs,
                 'session' => $sessionMs,
-            ]);
-        }
+                'validation' => $validationMs,
+                'view' => $viewMs,
+            ]
+        );
 
         return $response;
     }
@@ -41,6 +58,7 @@ class Auth extends BaseController
         $authStart = hrtime(true);
         $timingEnabled = $this->timingEnabled();
 
+        $validationStart = hrtime(true);
         $validation = $this->validate([
             'username' => [
                 'label' => 'username',
@@ -53,20 +71,24 @@ class Auth extends BaseController
                 'errors' => ['required' => 'password harus di isi']
             ]
         ]);
+        $validationMs = round((hrtime(true) - $validationStart) / 1_000_000, 3);
 
         if (!$validation) {
+            $totalMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+            $this->logTiming('AUTH_TIMING result=VALIDATION_FAIL total={total}ms validation={validation}ms', [
+                'total' => $totalMs,
+                'validation' => $validationMs,
+            ]);
             return redirect()->to('login')->withInput();
         }
 
-        $validationMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+        $requestStart = hrtime(true);
         $username = $this->request->getPost('username');
         $password = $this->request->getPost('password');
+        $requestMs = round((hrtime(true) - $requestStart) / 1_000_000, 3);
 
         $db = \Config\Database::connect();
 
-        // Fetch all authentication/session data needed by a successful login
-        // in one query. This removes the second users/profile round trip from
-        // the hot path while preserving the existing role and unit semantics.
         $dbStart = hrtime(true);
         $profile = $db->table('users')
             ->select('users.id, users.username, users.password, users.role_id, '
@@ -89,18 +111,21 @@ class Auth extends BaseController
         $passwordMs = round((hrtime(true) - $passwordStart) / 1_000_000, 3);
 
         if (!$profile || !$passwordValid) {
-            $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
-            if ($timingEnabled) {
-                log_message('info', 'AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms', [
-                    'username' => $username,
-                    'total' => $authMs,
-                    'validation' => $validationMs,
-                    'db' => $dbMs,
-                    'password' => $passwordMs,
-                ]);
-            }
-
+            $flashStart = hrtime(true);
             session()->setFlashdata('msg', 'Username atau Password salah');
+            $flashMs = round((hrtime(true) - $flashStart) / 1_000_000, 3);
+
+            $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+            $this->logTiming('AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms request={request}ms db={db}ms password={password}ms flash={flash}ms', [
+                'username' => $username,
+                'total' => $authMs,
+                'validation' => $validationMs,
+                'request' => $requestMs,
+                'db' => $dbMs,
+                'password' => $passwordMs,
+                'flash' => $flashMs,
+            ]);
+
             return redirect()->to('/login');
         }
 
@@ -113,7 +138,6 @@ class Auth extends BaseController
         $nama_pleton = '';
         $nama_kompi = '';
         $nama_batalyon = '';
-        $unitMs = 0.0;
 
         $unitTableByRole = [
             4 => ['table' => 'pleton',   'col' => 'danton_id', 'nameCol' => 'nama_pleton',   'var' => 'nama_pleton'],
@@ -122,12 +146,12 @@ class Auth extends BaseController
         ];
 
         $unitStart = hrtime(true);
+        $unitQueryCount = 0;
 
         if (isset($unitTableByRole[$roleId]) && !empty($profile['pegawai_id'])) {
             $u = $unitTableByRole[$roleId];
 
-            // Keep the existing fallback semantics, but only execute the
-            // second lookup when the primary ID lookup actually misses.
+            $unitQueryCount++;
             $row = $db->table($u['table'])
                 ->select($u['nameCol'])
                 ->where($u['col'], (int) $profile['pegawai_id'])
@@ -135,6 +159,7 @@ class Auth extends BaseController
                 ->getRow();
 
             if (!$row && !empty($profile['pegawai_nomor_induk'])) {
+                $unitQueryCount++;
                 $row = $db->table($u['table'])
                     ->select($u['nameCol'])
                     ->where($u['col'], $profile['pegawai_nomor_induk'])
@@ -155,7 +180,6 @@ class Auth extends BaseController
         $unitMs = round((hrtime(true) - $unitStart) / 1_000_000, 3);
 
         $sessionStart = hrtime(true);
-
         session()->set([
             'user_id'       => $profile['id'],
             'username'      => $profile['username'],
@@ -167,22 +191,20 @@ class Auth extends BaseController
             'nama'          => $nama,
             'logged_in'     => true
         ]);
-
         $sessionMs = round((hrtime(true) - $sessionStart) / 1_000_000, 3);
-        $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
 
-        if ($timingEnabled) {
-            log_message('info', 'AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms db={db}ms password={password}ms profile={profile}ms unit={unit}ms session={session}ms', [
-                'username' => $username,
-                'total' => $authMs,
-                'validation' => $validationMs,
-                'db' => $dbMs,
-                'password' => $passwordMs,
-                'profile' => 0,
-                'unit' => $unitMs,
-                'session' => $sessionMs,
-            ]);
-        }
+        $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+        $this->logTiming('AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms request={request}ms db={db}ms password={password}ms unit={unit}ms unit_queries={unit_queries} session={session}ms', [
+            'username' => $username,
+            'total' => $authMs,
+            'validation' => $validationMs,
+            'request' => $requestMs,
+            'db' => $dbMs,
+            'password' => $passwordMs,
+            'unit' => $unitMs,
+            'unit_queries' => $unitQueryCount,
+            'session' => $sessionMs,
+        ]);
 
         if ($roleId === 7) {
             return redirect()->to('/siswa/users/profil');
