@@ -6,28 +6,28 @@ $slowlogTimeout = if ($env:PHP_FPM_SLOWLOG_TIMEOUT) { $env:PHP_FPM_SLOWLOG_TIMEO
 $slowlogPath = '/tmp/e-ujian-php-fpm-slowlog.log'
 $startedAt = Get-Date
 
-function Invoke-DockerScript([string]$script) {
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
-    $output = & docker exec $phpContainer sh -c "printf '%s' '$encoded' | base64 -d | sh" 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
-    return [pscustomobject]@{ Output = $output.TrimEnd(); ExitCode = $exitCode }
+function Invoke-DockerExec([string[]]$Arguments) {
+    $output = & docker exec @Arguments 2>&1 | Out-String
+    [pscustomobject]@{ Output = $output.TrimEnd(); ExitCode = $LASTEXITCODE }
 }
 
-function Invoke-DockerCommand([string]$command) {
-    $output = & docker exec $phpContainer sh -c $command 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
-    return [pscustomobject]@{ Output = $output.TrimEnd(); ExitCode = $exitCode }
+function Invoke-ContainerShellScript([string]$Script) {
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script))
+    Invoke-DockerExec @($phpContainer, 'sh', '-c', "printf '%s' '$encoded' | base64 -d | sh")
 }
 
-function Save-ContainerFile([string]$containerPath, [string]$localPath) {
-    $output = & docker exec $phpContainer cat $containerPath 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
-    $output | Set-Content -Encoding UTF8 $localPath
-    return $exitCode
+function Save-Text([string]$Path, [string]$Text) {
+    $Text | Set-Content -Encoding UTF8 $Path
 }
 
-function Save-DiagnosticError([string]$reportDir, [string]$name, [string]$message) {
-    $message | Set-Content -Encoding UTF8 (Join-Path $reportDir $name)
+function Save-ContainerFile([string]$ContainerPath, [string]$LocalPath) {
+    $result = Invoke-DockerExec @($phpContainer, 'cat', $ContainerPath)
+    Save-Text $LocalPath $result.Output
+    return $result.ExitCode
+}
+
+function Save-CollectorError([string]$ReportDir, [string]$Name, [string]$Message) {
+    Save-Text (Join-Path $ReportDir $Name) $Message
 }
 
 Write-Host ''
@@ -39,200 +39,187 @@ Write-Host "Slowlog threshold   : $slowlogTimeout"
 Write-Host "Slowlog file        : $slowlogPath"
 Write-Host ''
 
-if (-not (docker ps --format '{{.Names}}' | Where-Object { $_ -eq $phpContainer })) {
+$running = @(docker ps --format '{{.Names}}' 2>$null)
+if ($running -notcontains $phpContainer) {
     throw "PHP container is not running: $phpContainer"
 }
 
-$findPoolScript = @'
-set -eu
+# Locate the www pool using a small POSIX script. No command substitution, awk, or shell redirection.
+$findPool = @'
+set -e
 for f in /usr/local/etc/php-fpm.d/*.conf /etc/php*/fpm/pool.d/*.conf /etc/php/*/fpm/pool.d/*.conf; do
-  [ -f "$f" ] || continue
-  if grep -q '^\[www\]' "$f" 2>/dev/null; then
-    printf '%s\n' "$f"
-    exit 0
-  fi
+    if [ -f "$f" ]; then
+        if grep -q '^\[www\]' "$f"; then
+            printf '%s\n' "$f"
+            exit 0
+        fi
+    fi
 done
 exit 1
 '@
-$poolResult = Invoke-DockerScript $findPoolScript
+$poolResult = Invoke-ContainerShellScript $findPool
 if ($poolResult.ExitCode -ne 0) {
-    throw "Unable to locate PHP-FPM [www] pool configuration. Exit code $($poolResult.ExitCode):`n$($poolResult.Output)"
+    throw "Unable to locate PHP-FPM [www] pool configuration. Exit $($poolResult.ExitCode):`n$($poolResult.Output)"
 }
-$poolPath = ($poolResult.Output -split "`r?`n" | Where-Object { $_ -and $_ -notmatch '^ERROR:' } | Select-Object -First 1)
-if (-not $poolPath) { throw 'Unable to locate PHP-FPM [www] pool configuration.' }
+$poolPath = ($poolResult.Output -split "`r?`n" | Where-Object { $_ -and $_ -notmatch '^ERROR:' } | Select-Object -First 1).Trim()
+if (-not $poolPath) { throw 'Unable to determine PHP-FPM pool configuration path.' }
 Write-Host "PHP-FPM pool config : $poolPath" -ForegroundColor Green
 
-$backupPath = "/tmp/e-ujian-php-fpm-www.$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()).bak"
-$patchText = "; E-UJIAN-SLOWLOG-BEGIN`nrequest_slowlog_timeout = $slowlogTimeout`nslowlog = $slowlogPath`nrequest_slowlog_trace_depth = 30`n; E-UJIAN-SLOWLOG-END`n"
-$patchB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($patchText))
-
-$configureScript = @"
-set -eu
-cp -- '$poolPath' '$backupPath'
-: > '$slowlogPath'
-sed -i '/; E-UJIAN-SLOWLOG-BEGIN/,/; E-UJIAN-SLOWLOG-END/d' '$poolPath'
-printf '%s' '$patchB64' | base64 -d >> '$poolPath'
-if php-fpm -tt > /tmp/e-ujian-php-fpm-config-test.log 2>&1; then
-  cat /tmp/e-ujian-php-fpm-config-test.log
-  exit 0
-fi
-cat /tmp/e-ujian-php-fpm-config-test.log
-exit 1
+$backupPath = "/tmp/e-ujian-php-fpm-www-backup.conf"
+$markerBegin = '; E-UJIAN-SLOWLOG-BEGIN'
+$markerEnd = '; E-UJIAN-SLOWLOG-END'
+$patch = @"
+$markerBegin
+request_slowlog_timeout = $slowlogTimeout
+slowlog = $slowlogPath
+request_slowlog_trace_depth = 30
+$markerEnd
 "@
-$validation = Invoke-DockerScript $configureScript
-if ($validation.ExitCode -ne 0) {
-    Invoke-DockerCommand "cp '$backupPath' '$poolPath'" | Out-Null
-    throw "PHP-FPM configuration validation failed (exit code $($validation.ExitCode)):`n$($validation.Output)"
+$patchB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($patch))
+
+# Configure and validate. The validation command is deliberately simple.
+$configScript = @"
+set -e
+cp '$poolPath' '$backupPath'
+: > '$slowlogPath'
+if grep -q '$markerBegin' '$poolPath'; then
+    sed -i '/$markerBegin/,/$markerEnd/d' '$poolPath'
+fi
+printf '%s' '$patchB64' | base64 -d >> '$poolPath'
+php-fpm -tt
+"@
+$configResult = Invoke-ContainerShellScript $configScript
+if ($configResult.ExitCode -ne 0) {
+    Invoke-DockerExec @($phpContainer, 'cp', $backupPath, $poolPath) | Out-Null
+    throw "PHP-FPM configuration validation failed (exit code $($configResult.ExitCode)):`n$($configResult.Output)"
 }
 
-$reload = Invoke-DockerCommand 'kill -USR2 1'
+# Reload PID 1 without embedding shell syntax.
+$reload = Invoke-DockerExec @($phpContainer, 'kill', '-USR2', '1')
 if ($reload.ExitCode -ne 0) {
-    Invoke-DockerCommand "cp '$backupPath' '$poolPath'" | Out-Null
+    Invoke-DockerExec @($phpContainer, 'cp', $backupPath, $poolPath) | Out-Null
     throw "PHP-FPM reload failed (exit code $($reload.ExitCode)):`n$($reload.Output)"
 }
 Start-Sleep -Seconds 2
 Write-Host 'PHP-FPM slowlog enabled.' -ForegroundColor Green
 
 $runnerExit = 1
-$latestReport = $null
 try {
     & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $scriptRoot 'run-login-with-monitoring.ps1')
     $runnerExit = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
-} finally {
+}
+finally {
     $finishedAt = Get-Date
     $reportRoot = Join-Path $scriptRoot '..\load\results'
-    $latestReport = Get-ChildItem -Path (Resolve-Path $reportRoot) -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $resolvedRoot = Resolve-Path $reportRoot
+    $latestReport = Get-ChildItem -Path $resolvedRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
     if ($latestReport) {
         $reportDir = $latestReport.FullName
 
-        # Primary evidence: direct file from the PHP container. No docker-log timestamps.
         try {
             Save-ContainerFile $slowlogPath (Join-Path $reportDir 'php-fpm-slowlog.txt') | Out-Null
         } catch {
-            Save-DiagnosticError $reportDir 'collector-error-slowlog.txt' "slowlog collection failed: $($_.Exception.Message)"
+            Save-CollectorError $reportDir 'collector-error-slowlog.txt' $_.Exception.Message
         }
 
         try {
             Save-ContainerFile $poolPath (Join-Path $reportDir 'php-fpm-pool-config-after.txt') | Out-Null
         } catch {
-            Save-DiagnosticError $reportDir 'collector-error-pool.txt' "pool config collection failed: $($_.Exception.Message)"
+            Save-CollectorError $reportDir 'collector-error-pool.txt' $_.Exception.Message
         }
 
+        # PID diagnostics: each /proc file is fetched directly. Parsing happens in PowerShell.
         try {
-            Save-ContainerFile '/tmp/e-ujian-php-fpm-config-test.log' (Join-Path $reportDir 'php-fpm-config-test.txt') | Out-Null
-        } catch {
-            Save-DiagnosticError $reportDir 'collector-error-config.txt' "config test collection failed: $($_.Exception.Message)"
-        }
-
-        # PID/state diagnostics are collected without ps, awk, grep, or command substitution.
-        $procScript = @'
-set +e
-printf '%s\n' 'timestamp|pid|ppid|state|utime|stime|rss_kb|cmdline'
-TS=$(date '+%Y-%m-%dT%H:%M:%S.%3N%z' 2>/dev/null || date)
-for p in /proc/[0-9]*; do
-  [ -r "$p/cmdline" ] || continue
-  cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
-  case "$cmd" in
-    *"php-fpm: pool www"*)
-      pid=${p##*/}
-      stat=$(cat "$p/stat" 2>/dev/null)
-      ppid=$(printf '%s\n' "$stat" | cut -d' ' -f4 2>/dev/null)
-      state=$(printf '%s\n' "$stat" | cut -d' ' -f3 2>/dev/null)
-      utime=$(printf '%s\n' "$stat" | cut -d' ' -f14 2>/dev/null)
-      stime=$(printf '%s\n' "$stat" | cut -d' ' -f15 2>/dev/null)
-      rss=$(awk '/^VmRSS:/ {print $2}' "$p/status" 2>/dev/null)
-      printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$TS" "$pid" "$ppid" "$state" "$utime" "$stime" "$rss" "$cmd"
-      ;;
-  esac
-done
-'@
-        try {
-            $procResult = Invoke-DockerScript $procScript
-            if ($procResult.ExitCode -eq 0) {
-                $procResult.Output | Set-Content -Encoding UTF8 (Join-Path $reportDir 'php-fpm-worker-pids-diagnostic.txt')
-            } else {
-                Save-DiagnosticError $reportDir 'collector-error-pid.txt' "PID diagnostic failed (exit $($procResult.ExitCode)): $($procResult.Output)"
+            $pidList = Invoke-DockerExec @($phpContainer, 'sh', '-c', 'printf "%s\n" /proc/[0-9]*')
+            $rows = New-Object System.Collections.Generic.List[string]
+            $rows.Add('timestamp|pid|ppid|state|utime|stime|rss_kb|cmdline')
+            $ts = (Get-Date).ToUniversalTime().ToString('o')
+            foreach ($procPath in ($pidList.Output -split "`r?`n")) {
+                if ($procPath -notmatch '^/proc/[0-9]+$') { continue }
+                $pid = Split-Path $procPath -Leaf
+                $cmd = (Invoke-DockerExec @($phpContainer, 'cat', "$procPath/cmdline")).Output.Replace([char]0, ' ').Trim()
+                if ($cmd -notlike '*php-fpm: pool www*') { continue }
+                $statText = (Invoke-DockerExec @($phpContainer, 'cat', "$procPath/stat")).Output.Trim()
+                $statusText = (Invoke-DockerExec @($phpContainer, 'cat', "$procPath/status")).Output
+                if (-not $statText) { continue }
+                # /proc/PID/stat fields: pid, comm, state, ppid, ..., utime(14), stime(15), rss(24).
+                $closeParen = $statText.LastIndexOf(')')
+                if ($closeParen -lt 0) { continue }
+                $afterComm = $statText.Substring($closeParen + 2).Trim()
+                $fields = $afterComm -split '\s+'
+                $state = if ($fields.Count -gt 0) { $fields[0] } else { '' }
+                $ppid = if ($fields.Count -gt 1) { $fields[1] } else { '' }
+                $utime = if ($fields.Count -ge 12) { $fields[11] } else { '' }
+                $stime = if ($fields.Count -ge 13) { $fields[12] } else { '' }
+                $rss = ''
+                $rssMatch = [regex]::Match($statusText, '(?m)^VmRSS:\s+(\d+)\s+kB')
+                if ($rssMatch.Success) { $rss = $rssMatch.Groups[1].Value }
+                $safeCmd = $cmd -replace '[\r\n|]', ' '
+                $rows.Add("$ts|$pid|$ppid|$state|$utime|$stime|$rss|$safeCmd")
             }
+            Save-Text (Join-Path $reportDir 'php-fpm-worker-pids-diagnostic.txt') ($rows -join "`r`n")
         } catch {
-            Save-DiagnosticError $reportDir 'collector-error-pid.txt' "PID diagnostic failed: $($_.Exception.Message)"
+            Save-CollectorError $reportDir 'collector-error-pid.txt' $_.Exception.Message
         }
 
-        # Runtime snapshot without shell pipelines.
-        $runtimeScript = @'
-set +e
-printf '%s\n' '=== PHP VERSION ==='
-php -v 2>&1
-printf '%s\n' '=== PHP-FPM VERSION ==='
-php-fpm -v 2>&1
-printf '%s\n' '=== PHP-FPM CONFIG TEST ==='
-php-fpm -tt 2>&1
-printf '%s\n' '=== PROCESS TREE (PROCFS) ==='
-for p in /proc/[0-9]*; do
-  [ -r "$p/cmdline" ] || continue
-  cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
-  case "$cmd" in
-    *php-fpm*) printf 'PID=%s CMD=%s\n' "${p##*/}" "$cmd";;
-  esac
-done
-printf '%s\n' '=== FILESYSTEM ==='
-df -h / /tmp 2>&1
-printf '%s\n' '=== MOUNTS ==='
-cat /proc/mounts 2>/dev/null
-'@
+        # PHP runtime information. No shell loops or command substitution.
         try {
-            $runtimeResult = Invoke-DockerScript $runtimeScript
-            $runtimeResult.Output | Set-Content -Encoding UTF8 (Join-Path $reportDir 'php-runtime-diagnostic.txt')
+            $runtime = New-Object System.Collections.Generic.List[string]
+            $runtime.Add('=== PHP VERSION ===')
+            $runtime.Add((Invoke-DockerExec @($phpContainer, 'php', '-v')).Output)
+            $runtime.Add('=== PHP-FPM VERSION ===')
+            $runtime.Add((Invoke-DockerExec @($phpContainer, 'php-fpm', '-v')).Output)
+            $runtime.Add('=== PHP-FPM CONFIG TEST ===')
+            $runtime.Add((Invoke-DockerExec @($phpContainer, 'php-fpm', '-tt')).Output)
+            $runtime.Add('=== FILESYSTEM ===')
+            $runtime.Add((Invoke-DockerExec @($phpContainer, 'df', '-h', '/', '/tmp')).Output)
+            Save-Text (Join-Path $reportDir 'php-runtime-diagnostic.txt') ($runtime -join "`r`n")
         } catch {
-            Save-DiagnosticError $reportDir 'collector-error-runtime.txt' "runtime diagnostic failed: $($_.Exception.Message)"
+            Save-CollectorError $reportDir 'collector-error-runtime.txt' $_.Exception.Message
         }
 
-        # Container log is a secondary source only; no --since parsing.
         try {
-            docker logs $phpContainer 2>&1 | Select-Object -Last 5000 | Set-Content -Encoding UTF8 (Join-Path $reportDir 'php-fpm-container-log-tail.txt')
+            $log = docker logs $phpContainer 2>&1 | Select-Object -Last 5000
+            Save-Text (Join-Path $reportDir 'php-fpm-container-log-tail.txt') (($log | Out-String).TrimEnd())
         } catch {
-            Save-DiagnosticError $reportDir 'collector-error-container-log.txt' "container log collection failed: $($_.Exception.Message)"
+            Save-CollectorError $reportDir 'collector-error-container-log.txt' $_.Exception.Message
         }
 
-        # Resource snapshots.
         try {
-            docker stats $phpContainer --no-stream --format 'name={{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}} net={{.NetIO}} block={{.BlockIO}} pids={{.PIDs}}' | Set-Content -Encoding UTF8 (Join-Path $reportDir 'php-final-stats.txt')
+            Save-Text (Join-Path $reportDir 'php-final-stats.txt') ((docker stats $phpContainer --no-stream --format 'name={{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}} net={{.NetIO}} block={{.BlockIO}} pids={{.PIDs}}} 2>&1 | Out-String).TrimEnd())
         } catch {
-            Save-DiagnosticError $reportDir 'collector-error-php-stats.txt' "PHP stats collection failed: $($_.Exception.Message)"
+            Save-CollectorError $reportDir 'collector-error-php-stats.txt' $_.Exception.Message
         }
 
         $redisName = if ($env:REDIS_CONTAINER) { $env:REDIS_CONTAINER } else { 'e-ujian-redis' }
-        if (docker ps --format '{{.Names}}' | Where-Object { $_ -eq $redisName }) {
-            docker stats $redisName --no-stream --format 'name={{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}} net={{.NetIO}} block={{.BlockIO}} pids={{.PIDs}}' | Set-Content -Encoding UTF8 (Join-Path $reportDir 'redis-final-stats.txt')
-            docker exec $redisName redis-cli INFO stats 2>&1 | Set-Content -Encoding UTF8 (Join-Path $reportDir 'redis-info-stats.txt')
+        if (@(docker ps --format '{{.Names}}' 2>$null) -contains $redisName) {
+            try { Save-Text (Join-Path $reportDir 'redis-final-stats.txt') ((docker stats $redisName --no-stream --format 'name={{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}} net={{.NetIO}} block={{.BlockIO}} pids={{.PIDs}}' 2>&1 | Out-String).TrimEnd()) } catch { Save-CollectorError $reportDir 'collector-error-redis-stats.txt' $_.Exception.Message }
+            try { Save-Text (Join-Path $reportDir 'redis-info-stats.txt') ((docker exec $redisName redis-cli INFO stats 2>&1 | Out-String).TrimEnd()) } catch { Save-CollectorError $reportDir 'collector-error-redis-info.txt' $_.Exception.Message }
         }
-        if (docker ps --format '{{.Names}}' | Where-Object { $_ -eq 'e-ujian-mysql' }) {
-            docker stats 'e-ujian-mysql' --no-stream --format 'name={{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}} net={{.NetIO}} block={{.BlockIO}} pids={{.PIDs}}' | Set-Content -Encoding UTF8 (Join-Path $reportDir 'mysql-final-stats.txt')
+        if (@(docker ps --format '{{.Names}}' 2>$null) -contains 'e-ujian-mysql') {
+            try { Save-Text (Join-Path $reportDir 'mysql-final-stats.txt') ((docker stats 'e-ujian-mysql' --no-stream --format 'name={{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}} net={{.NetIO}} block={{.BlockIO}} pids={{.PIDs}}' 2>&1 | Out-String).TrimEnd()) } catch { Save-CollectorError $reportDir 'collector-error-mysql-stats.txt' $_.Exception.Message }
         }
 
-        # Save a machine-readable diagnostic manifest.
-        $slowlogFile = Join-Path $reportDir 'php-fpm-slowlog.txt'
-        $slowlogEntries = 0
-        if (Test-Path $slowlogFile) {
-            $slowlogEntries = @(Get-Content $slowlogFile | Where-Object { $_ -match 'script_filename|pool www|request slowlog|child' }).Count
-        }
+        $slowlogLocal = Join-Path $reportDir 'php-fpm-slowlog.txt'
+        $slowlogLines = if (Test-Path $slowlogLocal) { @(Get-Content $slowlogLocal) } else { @() }
         [ordered]@{
-            enabled_at = $startedAt.ToString('o')
-            finished_at = $finishedAt.ToString('o')
+            generated_at = (Get-Date).ToUniversalTime().ToString('o')
             php_container = $phpContainer
             pool_config = $poolPath
             slowlog_timeout = $slowlogTimeout
-            slowlog_destination = $slowlogPath
-            slowlog_entry_hint_count = $slowlogEntries
+            slowlog_path = $slowlogPath
+            slowlog_line_count = $slowlogLines.Count
+            ptrace_denied = @($slowlogLines | Where-Object { $_ -match 'ptrace|Operation not permitted' }).Count
             runner_exit_code = $runnerExit
-        } | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 (Join-Path $reportDir 'php-fpm-slowlog.json')
+        } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $reportDir 'php-fpm-slowlog.json')
     }
 
     try {
-        $restore = Invoke-DockerCommand "cp '$backupPath' '$poolPath'"
+        $restore = Invoke-DockerExec @($phpContainer, 'cp', $backupPath, $poolPath)
         if ($restore.ExitCode -ne 0) { throw "restore exit code $($restore.ExitCode): $($restore.Output)" }
-        $reloadRestore = Invoke-DockerCommand 'kill -USR2 1'
-        if ($reloadRestore.ExitCode -ne 0) { throw "reload exit code $($reloadRestore.ExitCode): $($reloadRestore.Output)" }
+        $restoreReload = Invoke-DockerExec @($phpContainer, 'kill', '-USR2', '1')
+        if ($restoreReload.ExitCode -ne 0) { throw "reload exit code $($restoreReload.ExitCode): $($restoreReload.Output)" }
         Write-Host 'PHP-FPM original pool configuration restored.' -ForegroundColor Green
     } catch {
         Write-Host "WARNING: restore failed: $($_.Exception.Message)" -ForegroundColor Red
