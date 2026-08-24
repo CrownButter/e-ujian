@@ -44,6 +44,19 @@ services:
       - prometheus
     restart: unless-stopped
 
+  redis:
+    image: redis:7.4-alpine
+    container_name: e-ujian-redis
+    command: ["redis-server", "--appendonly", "no"]
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
   prometheus_data:
   grafana_data:
