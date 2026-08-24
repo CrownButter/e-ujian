@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 # ============================================================
-# E-UJIAN K6 LOAD TEST + DOCKER/TCP RESOURCE REPORT
+# E-UJIAN K6 LOAD TEST + DOCKER/TCP/PHP-FPM RESOURCE REPORT
 # Windows / MobaXterm compatible
 # ============================================================
 
@@ -18,6 +18,7 @@ $vus = if ($env:VUS) { [int]$env:VUS } else { 709 }
 $iterations = if ($env:ITERATIONS) { [int]$env:ITERATIONS } else { $vus }
 $baseUrl = if ($env:BASE_URL) { $env:BASE_URL } else { 'http://localhost:8080' }
 $tcpPort = if ($env:TCP_PORT) { [int]$env:TCP_PORT } else { 8080 }
+$phpContainer = if ($env:PHP_CONTAINER) { $env:PHP_CONTAINER } else { 'e-ujian-php' }
 
 if ($vus -lt 1 -or $vus -gt 709) { throw 'VUS must be between 1 and 709.' }
 if ($k6Mode -eq 'burst' -and $iterations -ne $vus) { throw 'ITERATIONS must equal VUS for burst mode.' }
@@ -27,6 +28,11 @@ $reportDir = Join-Path $reportRoot "${timestamp}_${vus}vu_${k6Mode}"
 $dockerCsv = Join-Path $reportDir 'docker-stats.csv'
 $tcpCsv = Join-Path $reportDir 'tcp-monitor.csv'
 $containerCsv = Join-Path $reportDir 'container-monitor.csv'
+$phpFpmCsv = Join-Path $reportDir 'php-fpm-workers.csv'
+$phpFpmBefore = Join-Path $reportDir 'php-fpm-config-before.txt'
+$phpFpmAfter = Join-Path $reportDir 'php-fpm-config-after.txt'
+$phpFpmProcessBefore = Join-Path $reportDir 'php-processes-before.txt'
+$phpFpmProcessAfter = Join-Path $reportDir 'php-processes-after.txt'
 $summaryFile = Join-Path $reportDir 'summary.json'
 $runMetadata = Join-Path $reportDir 'run.json'
 $peakFile = Join-Path $reportDir 'peak-resources.json'
@@ -45,6 +51,7 @@ Write-Host "VUS        : $vus"
 if ($k6Mode -eq 'burst') { Write-Host "ITERATIONS : $iterations (1 per VU)" }
 Write-Host "K6 SCRIPT  : $k6ScriptName"
 Write-Host "Accounts   : 001-$('{0:D3}' -f $vus)"
+Write-Host "PHP        : $phpContainer"
 Write-Host "Report     : $reportDir"
 Write-Host ''
 
@@ -63,13 +70,27 @@ if (Test-Path $composeFile) {
     docker compose -f $composeFile up -d | Out-Host
 }
 
-'timestamp,name,cpu_percent,memory_mb,memory_percent,net_rx_mb,net_tx_mb,pids' | Set-Content -Encoding UTF8 $dockerCsv
+# Capture the actual PHP-FPM configuration/process state from the running container.
+# This is intentionally a snapshot; it does not modify the container configuration.
+Write-Host "Capturing PHP-FPM configuration from $phpContainer ..." -ForegroundColor Cyan
+try {
+    docker exec $phpContainer sh -c 'php-fpm -tt 2>&1 || php-fpm8.3 -tt 2>&1 || php-fpm8.2 -tt 2>&1 || php-fpm8.1 -tt 2>&1' | Set-Content -Encoding UTF8 $phpFpmBefore
+} catch {
+    "PHP-FPM config capture failed: $($_.Exception.Message)" | Set-Content -Encoding UTF8 $phpFpmBefore
+}
+try {
+    docker exec $phpContainer sh -c 'ps -eo pid,ppid,stat,pcpu,pmem,args' | Set-Content -Encoding UTF8 $phpFpmProcessBefore
+} catch {
+    "PHP process capture failed: $($_.Exception.Message)" | Set-Content -Encoding UTF8 $phpFpmProcessBefore
+}
 
+'timestamp,name,cpu_percent,memory_mb,memory_percent,net_rx_mb,net_tx_mb,pids' | Set-Content -Encoding UTF8 $dockerCsv
 'timestamp,port,listening,established,time_wait,syn_sent,syn_received,close_wait,fin_wait_1,fin_wait_2' | Set-Content -Encoding UTF8 $tcpCsv
 'timestamp,name,status,running,restarts' | Set-Content -Encoding UTF8 $containerCsv
+'timestamp,total_php_processes,php_fpm_master,php_fpm_workers,php_worker_r,php_worker_s,php_worker_d,php_worker_z' | Set-Content -Encoding UTF8 $phpFpmCsv
 
 $monitorJob = Start-Job -ScriptBlock {
-    param($csv, $tcpPath, $containerPath, $peakPath, $tcpPort)
+    param($csv, $tcpPath, $containerPath, $phpPath, $peakPath, $tcpPort, $phpContainer)
 
     function ToMB($value) {
         $v = $value.Trim().Replace(',', '.')
@@ -95,6 +116,29 @@ $monitorJob = Start-Job -ScriptBlock {
             }
         } catch { }
         return $counts
+    }
+
+    function GetPhpFpmProcessSnapshot($container) {
+        $result = [ordered]@{ total=0; master=0; workers=0; r=0; s=0; d=0; z=0 }
+        try {
+            $lines = docker exec $container sh -c 'ps -eo stat,args' 2>$null
+            foreach ($line in $lines) {
+                if ($line -match 'php-fpm') {
+                    $result.total++
+                    $stat = (($line -split '\s+', 2)[0])
+                    if ($line -match 'master process') { $result.master++; continue }
+                    if ($line -match 'pool ') {
+                        $result.workers++
+                        $state = $stat.Substring(0,1)
+                        if ($state -eq 'R') { $result.r++ }
+                        elseif ($state -eq 'S') { $result.s++ }
+                        elseif ($state -eq 'D') { $result.d++ }
+                        elseif ($state -eq 'Z') { $result.z++ }
+                    }
+                }
+            }
+        } catch { }
+        return $result
     }
 
     $peaks = @{}
@@ -133,6 +177,9 @@ $monitorJob = Start-Job -ScriptBlock {
         $tcp = GetTcpCounts $tcpPort
         "$sampleTime,$tcpPort,$($tcp.Listen),$($tcp.Established),$($tcp.TimeWait),$($tcp.SynSent),$($tcp.SynReceived),$($tcp.CloseWait),$($tcp.FinWait1),$($tcp.FinWait2)" | Add-Content -Encoding UTF8 $tcpPath
 
+        $php = GetPhpFpmProcessSnapshot $phpContainer
+        "$sampleTime,$($php.total),$($php.master),$($php.workers),$($php.r),$($php.s),$($php.d),$($php.z)" | Add-Content -Encoding UTF8 $phpPath
+
         try {
             $containers = docker ps -a --format '{{.Names}}|{{.Status}}' 2>$null
             foreach ($line in $containers) {
@@ -147,9 +194,9 @@ $monitorJob = Start-Job -ScriptBlock {
             }
         } catch { }
 
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 1000
     }
-} -ArgumentList $dockerCsv, $tcpCsv, $containerCsv, $peakFile, $tcpPort
+} -ArgumentList $dockerCsv, $tcpCsv, $containerCsv, $phpFpmCsv, $peakFile, $tcpPort, $phpContainer
 
 $start = Get-Date
 $k6ExitCode = 1
@@ -177,6 +224,18 @@ try {
 $end = Get-Date
 $durationSeconds = [math]::Round(($end - $start).TotalSeconds, 3)
 
+Write-Host "Capturing PHP-FPM configuration/process state after test..." -ForegroundColor Cyan
+try {
+    docker exec $phpContainer sh -c 'php-fpm -tt 2>&1 || php-fpm8.3 -tt 2>&1 || php-fpm8.2 -tt 2>&1 || php-fpm8.1 -tt 2>&1' | Set-Content -Encoding UTF8 $phpFpmAfter
+} catch {
+    "PHP-FPM config capture failed: $($_.Exception.Message)" | Set-Content -Encoding UTF8 $phpFpmAfter
+}
+try {
+    docker exec $phpContainer sh -c 'ps -eo pid,ppid,stat,pcpu,pmem,args' | Set-Content -Encoding UTF8 $phpFpmProcessAfter
+} catch {
+    "PHP process capture failed: $($_.Exception.Message)" | Set-Content -Encoding UTF8 $phpFpmProcessAfter
+}
+
 $metadata = [ordered]@{
     test_name = 'E-UJIAN concurrent login'
     mode = $k6Mode
@@ -190,6 +249,7 @@ $metadata = [ordered]@{
     executor = if ($k6Mode -eq 'burst') { 'per-vu-iterations' } else { 'ramping-vus' }
     account_range = "001-$('{0:D3}' -f $vus)"
     tcp_port = $tcpPort
+    php_container = $phpContainer
     k6_script = $k6ScriptName
     k6_exit_code = $k6ExitCode
 }
@@ -215,6 +275,8 @@ Write-Host "HTML report      : $summaryHtml" -ForegroundColor Green
 Write-Host "Docker CSV       : $dockerCsv" -ForegroundColor Green
 Write-Host "TCP CSV          : $tcpCsv" -ForegroundColor Green
 Write-Host "Container CSV    : $containerCsv" -ForegroundColor Green
+Write-Host "PHP-FPM CSV      : $phpFpmCsv" -ForegroundColor Green
+Write-Host "PHP-FPM config   : $phpFpmBefore / $phpFpmAfter" -ForegroundColor Green
 Write-Host "Peak resources   : $peakFile" -ForegroundColor Green
 Write-Host ''
 
