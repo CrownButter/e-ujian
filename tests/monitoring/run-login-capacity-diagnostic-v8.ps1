@@ -27,14 +27,6 @@ function Write-Section([string]$Text) {
     Write-Host ('=' * 72)
 }
 
-function Invoke-DockerText([string[]]$Arguments) {
-    $out = & docker @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "docker command failed: docker $($Arguments -join ' ')`n$($out -join "`n")"
-    }
-    return ($out -join "`n")
-}
-
 function Test-Command([string]$Name) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         throw "Command '$Name' tidak ditemukan di PATH."
@@ -63,8 +55,9 @@ function Start-ResourceMonitor([string]$OutputFile, [int]$Seconds, [int]$Interva
     $job = Start-Job -ArgumentList $OutputFile,$Seconds,$Interval,$PhpContainer,$MysqlContainer,$MysqlUser,$MysqlPassword,$MysqlDatabase -ScriptBlock {
         param($File,$Duration,$Interval,$Php,$Mysql,$User,$Password,$Database)
         $ErrorActionPreference = 'Continue'
-        'timestamp,container,cpu_percent,memory_usage,memory_limit,memory_percent,net_rx,net_tx,block_read,block_write,pids' | Set-Content -Path $File -Encoding utf8
+        'timestamp,type,name,data' | Set-Content -Path $File -Encoding utf8
         $end = (Get-Date).AddSeconds($Duration + 3)
+
         while ((Get-Date) -lt $end) {
             $ts = (Get-Date).ToString('o')
 
@@ -73,14 +66,14 @@ function Start-ResourceMonitor([string]$OutputFile, [int]$Seconds, [int]$Interva
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
                 $p = $line -split '\|', 7
                 if ($p.Count -eq 7) {
-                    "$ts,$($p[0]),$($p[1]),$($p[2].Replace(',',' ')),$($p[2].Replace(',',' ')),$($p[3]),$($p[4].Replace(',',' ')),$($p[5].Replace(',',' ')),$($p[5].Replace(',',' ')),$($p[5].Replace(',',' ')),$($p[6])" | Add-Content -Path $File -Encoding utf8
+                    $data = "cpu=$($p[1]);memory=$($p[2]);memory_percent=$($p[3]);net=$($p[4]);block_io=$($p[5]);pids=$($p[6])"
+                    Add-Content -Path $File -Value "$ts,DOCKER,$($p[0]),$($data.Replace(',',' '))" -Encoding utf8
                 }
             }
 
             $phpPs = & docker exec $Php sh -c "ps -eo stat=,pcpu=,pmem=,comm= | grep php-fpm | grep -v grep" 2>$null
             $phpCount = @($phpPs).Count
-            $phpWorkers = @($phpPs | Where-Object { $_ -match 'php-fpm' }).Count
-            Add-Content -Path $File -Value "$ts,PHP_FPM,workers=$phpWorkers,process_lines=$phpCount,,,,$(($phpPs -join ' ').Replace(',',' '))" -Encoding utf8
+            Add-Content -Path $File -Value "$ts,PHP_FPM,processes,process_lines=$phpCount;details=$((($phpPs -join ' ') -replace ',',' '))" -Encoding utf8
 
             $mysqlSql = "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected','Threads_running','Threads_created','Threads_cached','Max_used_connections','Connections','Queries','Slow_queries');"
             $mysqlOut = & docker exec $Mysql mysql -u$User -p$Password -Nse $mysqlSql 2>$null
@@ -90,7 +83,7 @@ function Start-ResourceMonitor([string]$OutputFile, [int]$Seconds, [int]$Interva
                 if ($parts.Count -eq 2) { $pairs += "$($parts[0])=$($parts[1])" }
             }
             if ($pairs.Count -gt 0) {
-                Add-Content -Path $File -Value "$ts,MYSQL_STATUS,$(($pairs -join ';').Replace(',',' '))" -Encoding utf8
+                Add-Content -Path $File -Value "$ts,MYSQL_STATUS,status,$(($pairs -join ';').Replace(',',' '))" -Encoding utf8
             }
 
             Start-Sleep -Seconds ([Math]::Max(1,$Interval))
@@ -104,6 +97,19 @@ function Stop-ResourceMonitor($Job) {
     Stop-Job -Job $Job -ErrorAction SilentlyContinue | Out-Null
     Receive-Job -Job $Job -ErrorAction SilentlyContinue | Out-Null
     Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+}
+
+function Get-JsonNumber($Object, [string]$Path, $Default = $null) {
+    if ($null -eq $Object) { return $Default }
+    $current = $Object
+    foreach ($part in ($Path -split '\.')) {
+        if ($null -eq $current) { return $Default }
+        $property = $current.PSObject.Properties[$part]
+        if ($null -eq $property) { return $Default }
+        $current = $property.Value
+    }
+    if ($null -eq $current) { return $Default }
+    try { return [double]$current } catch { return $Default }
 }
 
 Test-Command 'docker'
@@ -137,6 +143,7 @@ foreach ($vus in $VusList) {
     $authDeltaFile = Join-Path $batch 'auth-timing-delta.csv'
     $k6OutputFile = Join-Path $batch 'k6-output.txt'
     $k6SummaryFile = Join-Path $batch 'summary.json'
+    $k6RawSummaryFile = Join-Path $batch 'k6-summary-export.json'
     $hostSnapshot = Join-Path $batch 'docker-info.txt'
 
     @(
@@ -156,7 +163,7 @@ foreach ($vus in $VusList) {
     $env:DURATION = "${DurationSeconds}s"
     $env:K6_SUMMARY_FILE = $k6SummaryFile
 
-    $k6Args = @('run','--summary-export',$k6SummaryFile,$K6Script)
+    $k6Args = @('run','--summary-export',$k6RawSummaryFile,$K6Script)
     Write-Host "[K6] k6 $($k6Args -join ' ')"
 
     $k6Lines = & k6 @k6Args 2>&1
@@ -171,21 +178,11 @@ foreach ($vus in $VusList) {
         try { $summary = Get-Content $k6SummaryFile -Raw | ConvertFrom-Json } catch { $summary = $null }
     }
 
-    $httpFailed = $null
-    $loginP95 = $null
-    $loginP99 = $null
-    $authP95 = $null
-    $loginSuccess = $null
-
-    if ($null -ne $summary) {
-        if ($summary.metrics.http_req_failed) { $httpFailed = $summary.metrics.http_req_failed.values.rate }
-        if ($summary.metrics.login_duration) {
-            $loginP95 = $summary.metrics.login_duration.values.'p(95)'
-            $loginP99 = $summary.metrics.login_duration.values.'p(99)'
-        }
-        if ($summary.metrics.auth_duration) { $authP95 = $summary.metrics.auth_duration.values.'p(95)' }
-        if ($summary.result) { $loginSuccess = $summary.result.login_success_rate }
-    }
+    $httpFailed = Get-JsonNumber $summary 'result.http_failed'
+    $loginP95 = Get-JsonNumber $summary 'metrics.login_duration.values.p(95)'
+    $loginP99 = Get-JsonNumber $summary 'metrics.login_duration.values.p(99)'
+    $authP95 = Get-JsonNumber $summary 'metrics.auth_duration.values.p(95)'
+    $loginSuccess = Get-JsonNumber $summary 'result.login_success_rate'
 
     $summaryRows += [pscustomobject]@{
         vus = $vus
@@ -214,14 +211,16 @@ $summaryRows | Export-Csv -Path $summaryCsv -NoTypeInformation -Encoding utf8
     "Duration: ${DurationSeconds}s per batch"
     ''
     'Collected per batch:'
-    '- K6 summary and raw output'
+    '- K6 custom summary.json and raw k6-summary-export.json'
+    '- K6 raw console output'
     '- Docker CPU / memory / network / block I/O / PIDs'
     '- PHP-FPM process snapshot'
     '- MySQL Threads_connected / Threads_running / connections / queries / slow queries'
     '- CodeIgniter auth-timing.csv delta'
     ''
-    'Important: Docker stats are sampled once per second. The PHP-FPM and MySQL lines are diagnostic snapshots, not exact queue counters.'
-    'Use the batch files together with auth-timing.csv to identify whether latency is dominated by PHP-FPM, MySQL, bcrypt, unit queries, session handling, or request/network overhead.'
+    'The wrapper intentionally keeps the K6 handleSummary JSON separate from --summary-export JSON.'
+    'This avoids the two K6 output mechanisms overwriting the same file.'
+    'Use auth-timing.csv together with resource-samples.csv and K6 metrics to identify whether latency is dominated by PHP-FPM, MySQL, bcrypt, unit queries, session handling, or request/network overhead.'
 ) | Set-Content -Path (Join-Path $ReportRoot 'README.txt') -Encoding utf8
 
 Remove-Item Env:BASE_URL -ErrorAction SilentlyContinue
