@@ -34,7 +34,7 @@ class Auth extends BaseController
             @mkdir($directory, 0775, true);
         }
 
-        $path = $directory . DIRECTORY_SEPARATOR . 'auth-timing.csv';
+        $path = WRITEPATH . 'logs' . DIRECTORY_SEPARATOR . 'auth-timing.csv';
         $handle = @fopen($path, 'ab');
         if ($handle === false) {
             return;
@@ -45,10 +45,10 @@ class Auth extends BaseController
                 if (filesize($path) === 0) {
                     fputcsv($handle, [
                         'timestamp', 'username', 'result', 'validation_ms',
-                        'request_ms', 'db_ms', 'password_ms', 'unit_ms',
-                        'unit_queries', 'session_ms', 'rehash_ms',
+                        'request_ms', 'ticket_ms', 'db_ms', 'password_ms',
+                        'unit_ms', 'unit_queries', 'session_ms', 'rehash_ms',
                         'rehash_update_ok', 'rehash_affected_rows', 'rehash_error',
-                        'total_ms'
+                        'http_status', 'redirect_path', 'total_ms'
                     ]);
                 }
                 fputcsv($handle, $row);
@@ -118,7 +118,8 @@ class Auth extends BaseController
             $totalMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
             $this->writeAuthTiming([
                 $timestamp, '', 'VALIDATION_FAIL', $validationMs,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, '', $totalMs
+                0, 0, 0, 0, 0, 0, 0, 0,
+                '', 0, '', 302, '/login', $totalMs
             ]);
             $this->logTiming('AUTH_TIMING result=VALIDATION_FAIL total={total}ms validation={validation}ms', [
                 'total' => $totalMs,
@@ -128,14 +129,36 @@ class Auth extends BaseController
         }
 
         $requestStart = hrtime(true);
-        $username = $this->request->getPost('username');
-        $password = $this->request->getPost('password');
+        $username = trim((string) $this->request->getPost('username'));
+        $password = (string) $this->request->getPost('password');
         $waitingRoomTicket = trim((string) $this->request->getPost('waiting_room_ticket'));
         $requestMs = round((hrtime(true) - $requestStart) / 1_000_000, 3);
 
         $waitingRoom = new \App\Controllers\WaitingRoom();
-        if (!$waitingRoom->consumeTicket($waitingRoomTicket)) {
+        $ticketStart = hrtime(true);
+        $ticketAccepted = $waitingRoom->consumeTicket($waitingRoomTicket);
+        $ticketMs = round((hrtime(true) - $ticketStart) / 1_000_000, 3);
+
+        if (!$ticketAccepted) {
+            $flashStart = hrtime(true);
             session()->setFlashdata('msg', 'Sistem sedang mengatur antrean login. Silakan coba lagi.');
+            $flashMs = round((hrtime(true) - $flashStart) / 1_000_000, 3);
+            $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+
+            $this->writeAuthTiming([
+                $timestamp, $username, 'TICKET_REJECTED', $validationMs,
+                $requestMs, $ticketMs, 0, 0, 0, 0, $flashMs, 0,
+                '', 0, '', 302, '/login', $authMs
+            ]);
+            $this->logTiming('AUTH_TIMING result=TICKET_REJECTED username={username} total={total}ms validation={validation}ms request={request}ms ticket={ticket}ms flash={flash}ms', [
+                'username' => $username,
+                'total' => $authMs,
+                'validation' => $validationMs,
+                'request' => $requestMs,
+                'ticket' => $ticketMs,
+                'flash' => $flashMs,
+            ]);
+
             return redirect()->to('/login')->withInput();
         }
 
@@ -160,16 +183,19 @@ class Auth extends BaseController
             $flashMs = round((hrtime(true) - $flashStart) / 1_000_000, 3);
 
             $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+            $result = !$user ? 'USER_NOT_FOUND' : 'PASSWORD_INVALID';
             $this->writeAuthTiming([
-                $timestamp, $username, 'FAIL', $validationMs,
-                $requestMs, $dbMs, $passwordMs, 0, 0, $flashMs,
-                0, 0, 0, '', $authMs
+                $timestamp, $username, $result, $validationMs,
+                $requestMs, $ticketMs, $dbMs, $passwordMs, 0, 0, $flashMs,
+                0, '', 0, '', 302, '/login', $authMs
             ]);
-            $this->logTiming('AUTH_TIMING result=FAIL username={username} total={total}ms validation={validation}ms request={request}ms db={db}ms password={password}ms flash={flash}ms', [
+            $this->logTiming('AUTH_TIMING result={result} username={username} total={total}ms validation={validation}ms request={request}ms ticket={ticket}ms db={db}ms password={password}ms flash={flash}ms', [
+                'result' => $result,
                 'username' => $username,
                 'total' => $authMs,
                 'validation' => $validationMs,
                 'request' => $requestMs,
+                'ticket' => $ticketMs,
                 'db' => $dbMs,
                 'password' => $passwordMs,
                 'flash' => $flashMs,
@@ -320,20 +346,24 @@ class Auth extends BaseController
         $sessionMs = round((hrtime(true) - $sessionStart) / 1_000_000, 3);
 
         $authMs = round((hrtime(true) - $authStart) / 1_000_000, 3);
+        $redirectPath = $roleId === 7 ? '/siswa/users/profil' : '/dashboard';
         $this->writeAuthTiming([
             $timestamp, $username, 'SUCCESS', $validationMs,
-            $requestMs, $dbMs, $passwordMs, $unitMs,
+            $requestMs, $ticketMs, $dbMs, $passwordMs, $unitMs,
             $unitQueryCount, $sessionMs, $rehashMs,
             $rehashUpdateOk ? 'true' : 'false',
             $rehashAffectedRows,
             $rehashError,
+            302,
+            $redirectPath,
             $authMs
         ]);
-        $this->logTiming('AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms request={request}ms db={db}ms password={password}ms unit={unit}ms unit_queries={unit_queries} session={session}ms rehash={rehash}ms rehash_update_ok={rehash_update_ok} rehash_affected_rows={rehash_affected_rows} rehash_error={rehash_error}', [
+        $this->logTiming('AUTH_TIMING result=SUCCESS username={username} total={total}ms validation={validation}ms request={request}ms ticket={ticket}ms db={db}ms password={password}ms unit={unit}ms unit_queries={unit_queries} session={session}ms rehash={rehash}ms rehash_update_ok={rehash_update_ok} rehash_affected_rows={rehash_affected_rows} rehash_error={rehash_error}', [
             'username' => $username,
             'total' => $authMs,
             'validation' => $validationMs,
             'request' => $requestMs,
+            'ticket' => $ticketMs,
             'db' => $dbMs,
             'password' => $passwordMs,
             'unit' => $unitMs,
