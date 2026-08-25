@@ -1,13 +1,16 @@
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
 const BASE_URL = (__ENV.BASE_URL || 'http://localhost:8080').replace(/\/$/, '');
 const LOGIN_PATH = '/login';
+const WAITING_ENTER_PATH = '/waiting-room/enter';
+const WAITING_STATUS_PATH = '/waiting-room/status';
 const AUTH_PATH = '/auth';
 const SUCCESS_PATH = '/siswa/users/profil';
 const MAX_ACCOUNT = 709;
 const VUS = parsePositiveInt(__ENV.VUS, 250);
+const MAX_WAITING_POLLS = parsePositiveInt(__ENV.MAX_WAITING_POLLS, 35);
 
 if (VUS > MAX_ACCOUNT) {
   throw new Error(`VUS cannot exceed ${MAX_ACCOUNT}. Received: ${VUS}`);
@@ -25,6 +28,13 @@ function parsePositiveInt(value, fallback) {
 const loginAttempts = new Counter('login_attempts');
 const csrfSuccess = new Counter('csrf_success');
 const csrfFailure = new Counter('csrf_failure');
+const waitingEnterAttempts = new Counter('waiting_enter_attempts');
+const waitingEnterSuccess = new Counter('waiting_enter_success');
+const waitingEnterFailure = new Counter('waiting_enter_failure');
+const waitingReady = new Counter('waiting_ready');
+const waitingExpired = new Counter('waiting_expired');
+const waitingStatusFailure = new Counter('waiting_status_failure');
+const waitingPolls = new Counter('waiting_polls');
 const authAttempts = new Counter('auth_attempts');
 const authSuccess = new Counter('auth_success');
 const authFailure = new Counter('auth_failure');
@@ -33,6 +43,7 @@ const authRedirectWrong = new Counter('auth_redirect_wrong');
 const loginSuccessRate = new Rate('login_success_rate');
 const loginDuration = new Trend('login_duration', true);
 const loginPageDuration = new Trend('login_page_duration', true);
+const waitingDuration = new Trend('waiting_duration', true);
 const authDuration = new Trend('auth_duration', true);
 
 export const options = {
@@ -73,11 +84,12 @@ function accountForVU() {
   return String(number).padStart(3, '0');
 }
 
+function metricFailure(message, username) {
+  console.error(`[LOGIN DIAGNOSTIC] username=${username} ${message}`);
+}
+
 export default function () {
-  // Prevent a VU from performing multiple login attempts during the ramp.
-  if (__ITER > 0) {
-    return;
-  }
+  if (__ITER > 0) return;
 
   const username = accountForVU();
   const password = username;
@@ -100,14 +112,111 @@ export default function () {
     csrfFailure.add(1, { username });
     loginSuccessRate.add(false, { username });
     loginDuration.add(Date.now() - startedAt, { username });
-    console.error(`[LOGIN PAGE FAILED] username=${username} status=${loginPage.status}`);
+    metricFailure(`login_page_failed status=${loginPage.status}`, username);
     return;
   }
 
   csrfSuccess.add(1, { username });
+
+  const waitingStart = Date.now();
+  let waitingRoomTicket = '';
+  let ready = false;
+
+  waitingEnterAttempts.add(1, { username });
+  const enterResponse = http.post(`${BASE_URL}${WAITING_ENTER_PATH}`, null, {
+    redirects: 0,
+    tags: { request: 'waiting_enter', username },
+  });
+
+  let enterData = null;
+  try {
+    enterData = enterResponse.json();
+  } catch (_) {
+    enterData = null;
+  }
+
+  const enterOk = enterResponse.status === 200 && enterData && enterData.ok === true && typeof enterData.ticket === 'string';
+  if (!enterOk) {
+    waitingEnterFailure.add(1, { username });
+    waitingStatusFailure.add(1, { username });
+    loginSuccessRate.add(false, { username });
+    loginDuration.add(Date.now() - startedAt, { username });
+    metricFailure(
+      `waiting_enter_failed status=${enterResponse.status} body=${(enterResponse.body || '').slice(0, 200)}`,
+      username
+    );
+    return;
+  }
+
+  waitingEnterSuccess.add(1, { username });
+  waitingRoomTicket = enterData.ticket;
+
+  if (enterData.status === 'ready') {
+    ready = true;
+    waitingReady.add(1, { username });
+  }
+
+  for (let poll = 0; !ready && poll < MAX_WAITING_POLLS; poll += 1) {
+    const retryAfter = Math.max(1, Number(enterData.retry_after || 2));
+    sleep(retryAfter);
+
+    const statusResponse = http.get(
+      `${BASE_URL}${WAITING_STATUS_PATH}?ticket=${encodeURIComponent(waitingRoomTicket)}`,
+      {
+        redirects: 0,
+        tags: { request: 'waiting_status', username },
+      }
+    );
+    waitingPolls.add(1, { username });
+
+    let statusData = null;
+    try {
+      statusData = statusResponse.json();
+    } catch (_) {
+      statusData = null;
+    }
+
+    if (statusResponse.status === 200 && statusData?.ok === true && statusData.status === 'ready') {
+      ready = true;
+      waitingReady.add(1, { username });
+      break;
+    }
+
+    if (statusResponse.status === 410 || statusData?.expired === true) {
+      waitingExpired.add(1, { username });
+      break;
+    }
+
+    if (statusResponse.status !== 200 || !statusData?.ok) {
+      waitingStatusFailure.add(1, { username });
+      metricFailure(
+        `waiting_status_failed poll=${poll + 1} status=${statusResponse.status} body=${(statusResponse.body || '').slice(0, 200)}`,
+        username
+      );
+      break;
+    }
+
+    enterData = statusData;
+  }
+
+  waitingDuration.add(Date.now() - waitingStart, { username });
+
+  if (!ready) {
+    loginSuccessRate.add(false, { username });
+    loginDuration.add(Date.now() - startedAt, { username });
+    metricFailure(`waiting_not_ready ticket=${waitingRoomTicket}`, username);
+    return;
+  }
+
   authAttempts.add(1, { username });
 
-  const payload = { username, password, [csrf.name]: csrf.value };
+  const payload = {
+    username,
+    password,
+    [csrf.name]: csrf.value,
+    waiting_room_ticket: waitingRoomTicket,
+  };
+
   const authResponse = http.post(`${BASE_URL}${AUTH_PATH}`, payload, {
     redirects: 0,
     tags: { request: 'auth', username },
@@ -141,11 +250,10 @@ export default function () {
   }
 
   const responsePreview = (authResponse.body || '').replace(/\s+/g, ' ').slice(0, 200);
-  console.error(
-    `[AUTH FAILED] username=${username} status=${authResponse.status} ` +
-    `location=${location || '<none>'} ` +
-    `serverTiming=${JSON.stringify(authResponse.timings)} ` +
-    `body=${responsePreview || '<empty>'}`
+  metricFailure(
+    `auth_failed status=${authResponse.status} location=${location || '<none>'} ` +
+    `serverTiming=${JSON.stringify(authResponse.timings)} body=${responsePreview || '<empty>'}`,
+    username
   );
 }
 
@@ -162,17 +270,29 @@ export function handleSummary(data) {
       account_range: `001-${String(VUS).padStart(3, '0')}`,
       executor: 'ramping-vus',
       iteration_policy: 'one login attempt per VU; repeat iterations ignored',
+      waiting_room: 'enter -> poll status -> auth with ready ticket',
       generated_at: new Date().toISOString(),
     },
     requests: {
       get_login: count('login_attempts'),
+      waiting_enter: count('waiting_enter_attempts'),
+      waiting_status_polls: count('waiting_polls'),
       post_auth: count('auth_attempts'),
-      total_http_requests: count('login_attempts') + count('auth_attempts'),
+      total_http_requests:
+        count('login_attempts') +
+        count('waiting_enter_attempts') +
+        count('waiting_polls') +
+        count('auth_attempts'),
     },
     result: {
       login_attempts: count('login_attempts'),
       csrf_success: count('csrf_success'),
       csrf_failure: count('csrf_failure'),
+      waiting_enter_success: count('waiting_enter_success'),
+      waiting_enter_failure: count('waiting_enter_failure'),
+      waiting_ready: count('waiting_ready'),
+      waiting_expired: count('waiting_expired'),
+      waiting_status_failure: count('waiting_status_failure'),
       auth_attempts: count('auth_attempts'),
       auth_success: count('auth_success'),
       auth_failure: count('auth_failure'),
@@ -184,7 +304,12 @@ export function handleSummary(data) {
   };
 
   return {
-    stdout: `\nE-UJIAN K6 RAMP-UP LOGIN DIAGNOSTIC\n====================================\nBASE_URL             : ${BASE_URL}\nCONFIGURED VUS       : ${VUS}\nACCOUNT RANGE        : 001-${String(VUS).padStart(3, '0')}\nITERATION POLICY     : one attempt per VU\nGET /login           : ${count('login_attempts')}\nCSRF SUCCESS         : ${count('csrf_success')}\nCSRF FAILURE         : ${count('csrf_failure')}\nPOST /auth           : ${count('auth_attempts')}\nAUTH SUCCESS         : ${count('auth_success')}\nAUTH FAILURE         : ${count('auth_failure')}\nAUTH HTTP UNEXPECTED : ${count('auth_http_unexpected')}\nAUTH REDIRECT WRONG  : ${count('auth_redirect_wrong')}\nTOTAL HTTP REQ       : ${count('login_attempts') + count('auth_attempts')}\nSUCCESS RATE         : ${(rate * 100).toFixed(2)}%\n`,
+    stdout: `\nE-UJIAN K6 RAMP-UP LOGIN DIAGNOSTIC\n====================================\nBASE_URL             : ${BASE_URL}\nCONFIGURED VUS       : ${VUS}\nACCOUNT RANGE        : 001-${String(VUS).padStart(3, '0')}\nITERATION POLICY     : one attempt per VU\nWAITING ROOM         : enter -> poll -> ready -> auth\nGET /login           : ${count('login_attempts')}\nCSRF SUCCESS         : ${count('csrf_success')}\nCSRF FAILURE         : ${count('csrf_failure')}\nWAITING ENTER OK     : ${count('waiting_enter_success')}\nWAITING ENTER FAIL   : ${count('waiting_enter_failure')}\nWAITING READY        : ${count('waiting_ready')}\nWAITING EXPIRED      : ${count('waiting_expired')}\nWAITING STATUS FAIL  : ${count('waiting_status_failure')}\nWAITING POLLS        : ${count('waiting_polls')}\nPOST /auth           : ${count('auth_attempts')}\nAUTH SUCCESS         : ${count('auth_success')}\nAUTH FAILURE         : ${count('auth_failure')}\nAUTH HTTP UNEXPECTED : ${count('auth_http_unexpected')}\nAUTH REDIRECT WRONG  : ${count('auth_redirect_wrong')}\nTOTAL HTTP REQ       : ${
+      count('login_attempts') +
+      count('waiting_enter_attempts') +
+      count('waiting_polls') +
+      count('auth_attempts')
+    }\nSUCCESS RATE         : ${(rate * 100).toFixed(2)}%\n`,
     [__ENV.K6_SUMMARY_FILE || 'summary.json']: JSON.stringify(report, null, 2),
   };
 }
