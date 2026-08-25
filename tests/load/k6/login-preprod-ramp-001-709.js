@@ -1,5 +1,4 @@
 import http from 'k6/http';
-import { check } from 'k6/metrics';
 import { check } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
