@@ -28,7 +28,6 @@ const csrfFailure = new Counter('csrf_failure');
 const authAttempts = new Counter('auth_attempts');
 const authSuccess = new Counter('auth_success');
 const authFailure = new Counter('auth_failure');
-const ticketRejected = new Counter('ticket_rejected');
 const authHttpUnexpected = new Counter('auth_http_unexpected');
 const authRedirectWrong = new Counter('auth_redirect_wrong');
 const loginSuccessRate = new Rate('login_success_rate');
@@ -177,7 +176,6 @@ export function handleSummary(data) {
       auth_attempts: count('auth_attempts'),
       auth_success: count('auth_success'),
       auth_failure: count('auth_failure'),
-      ticket_rejected: count('ticket_rejected'),
       auth_http_unexpected: count('auth_http_unexpected'),
       auth_redirect_wrong: count('auth_redirect_wrong'),
       login_success_rate: rate,
