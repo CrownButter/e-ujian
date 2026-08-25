@@ -86,7 +86,11 @@ function recordHttpFailure(response) {
 }
 
 function jsonBody(response) {
-  try { return JSON.parse(response.body || '{}'); } catch (_) { return null; }
+  try {
+    return JSON.parse(response.body || '{}');
+  } catch (_) {
+    return null;
+  }
 }
 
 export default function () {
@@ -124,7 +128,7 @@ export default function () {
   waitingRoomDuration.add(enterResponse.timings.duration);
   recordHttpFailure(enterResponse);
 
-  let enterData = jsonBody(enterResponse);
+  const enterData = jsonBody(enterResponse);
   if (
     enterResponse.status !== 200 ||
     !enterData ||
@@ -141,11 +145,9 @@ export default function () {
   const ticket = enterData.ticket;
   let status = enterData.status;
   const deadline = Date.now() + MAX_WAIT_SECONDS * 1000;
-  let pollCount = 0;
 
   while (status !== 'ready' && Date.now() < deadline) {
     sleep(POLL_INTERVAL_SECONDS);
-    pollCount += 1;
 
     const response = http.get(
       `${BASE_URL}/waiting-room/status?ticket=${encodeURIComponent(ticket)}`,
@@ -177,7 +179,7 @@ export default function () {
   }
 
   queueReady.add(1);
-  queueWaitDuration.add(Date.now() - queueStart - (pollCount * POLL_INTERVAL_SECONDS * 1000));
+  queueWaitDuration.add(Date.now() - queueStart);
 
   authAttempts.add(1);
   const authResponse = http.post(
