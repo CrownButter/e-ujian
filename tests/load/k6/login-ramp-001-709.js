@@ -102,7 +102,7 @@ export default function () {
   });
   loginPageDuration.add(loginPage.timings.duration, { username });
 
-  const csrf = extractCsrf(loginPage.body || '');
+  let csrf = extractCsrf(loginPage.body || '');
   const pageOk = check(loginPage, {
     'login page status is 200': (r) => r.status === 200,
     'CSRF token exists': () => csrf !== null && csrf.value.length > 0,
@@ -123,7 +123,8 @@ export default function () {
   let ready = false;
 
   waitingEnterAttempts.add(1, { username });
-  const enterResponse = http.post(`${BASE_URL}${WAITING_ENTER_PATH}`, null, {
+  const enterPayload = { [csrf.name]: csrf.value };
+  const enterResponse = http.post(`${BASE_URL}${WAITING_ENTER_PATH}`, enterPayload, {
     redirects: 0,
     tags: { request: 'waiting_enter', username },
   });
@@ -150,6 +151,10 @@ export default function () {
 
   waitingEnterSuccess.add(1, { username });
   waitingRoomTicket = enterData.ticket;
+
+  if (enterData.csrf_token) {
+    csrf.value = enterData.csrf_token;
+  }
 
   if (enterData.status === 'ready') {
     ready = true;
