@@ -28,6 +28,9 @@ const csrfFailure = new Counter('csrf_failure');
 const authAttempts = new Counter('auth_attempts');
 const authSuccess = new Counter('auth_success');
 const authFailure = new Counter('auth_failure');
+const ticketRejected = new Counter('ticket_rejected');
+const authHttpUnexpected = new Counter('auth_http_unexpected');
+const authRedirectWrong = new Counter('auth_redirect_wrong');
 const loginSuccessRate = new Rate('login_success_rate');
 const loginDuration = new Trend('login_duration', true);
 const loginPageDuration = new Trend('login_page_duration', true);
@@ -35,7 +38,7 @@ const authDuration = new Trend('auth_duration', true);
 
 export const options = {
   scenarios: {
-    ramp_login: {
+    login_once_per_vu: {
       executor: 'ramping-vus',
       startVUs: 0,
       stages: [
@@ -72,16 +75,21 @@ function accountForVU() {
 }
 
 export default function () {
+  // Prevent a VU from performing multiple login attempts during the ramp.
+  if (__ITER > 0) {
+    return;
+  }
+
   const username = accountForVU();
   const password = username;
   const startedAt = Date.now();
-  loginAttempts.add(1);
+  loginAttempts.add(1, { username });
 
   const loginPage = http.get(`${BASE_URL}${LOGIN_PATH}`, {
     redirects: 0,
     tags: { request: 'login_page', username },
   });
-  loginPageDuration.add(loginPage.timings.duration);
+  loginPageDuration.add(loginPage.timings.duration, { username });
 
   const csrf = extractCsrf(loginPage.body || '');
   const pageOk = check(loginPage, {
@@ -90,37 +98,56 @@ export default function () {
   });
 
   if (!pageOk || !csrf) {
-    csrfFailure.add(1);
-    loginSuccessRate.add(false);
-    loginDuration.add(Date.now() - startedAt);
+    csrfFailure.add(1, { username });
+    loginSuccessRate.add(false, { username });
+    loginDuration.add(Date.now() - startedAt, { username });
+    console.error(`[LOGIN PAGE FAILED] username=${username} status=${loginPage.status}`);
     return;
   }
 
-  csrfSuccess.add(1);
-  authAttempts.add(1);
+  csrfSuccess.add(1, { username });
+  authAttempts.add(1, { username });
 
   const payload = { username, password, [csrf.name]: csrf.value };
   const authResponse = http.post(`${BASE_URL}${AUTH_PATH}`, payload, {
     redirects: 0,
     tags: { request: 'auth', username },
   });
-  authDuration.add(authResponse.timings.duration);
+  authDuration.add(authResponse.timings.duration, { username });
 
   const location = authResponse.headers.Location || authResponse.headers.location || '';
-  const success = check(authResponse, {
-    'auth returns redirect': (r) => r.status >= 300 && r.status < 400,
-    'auth redirects to student profile': () => location.includes(SUCCESS_PATH),
+  const isRedirect = authResponse.status >= 300 && authResponse.status < 400;
+  const isExpectedRedirect = location.includes(SUCCESS_PATH);
+  const success = isRedirect && isExpectedRedirect;
+
+  check(authResponse, {
+    'auth returns redirect': () => isRedirect,
+    'auth redirects to expected destination': () => isExpectedRedirect,
   });
 
-  loginDuration.add(Date.now() - startedAt);
-  loginSuccessRate.add(success);
+  loginDuration.add(Date.now() - startedAt, { username });
+  loginSuccessRate.add(success, { username });
 
   if (success) {
-    authSuccess.add(1);
-  } else {
-    authFailure.add(1);
-    console.error(`[AUTH FAILED] username=${username} status=${authResponse.status} location=${location || '<none>'}`);
+    authSuccess.add(1, { username });
+    return;
   }
+
+  authFailure.add(1, { username });
+
+  if (!isRedirect) {
+    authHttpUnexpected.add(1, { username });
+  } else if (!isExpectedRedirect) {
+    authRedirectWrong.add(1, { username });
+  }
+
+  const responsePreview = (authResponse.body || '').replace(/\s+/g, ' ').slice(0, 200);
+  console.error(
+    `[AUTH FAILED] username=${username} status=${authResponse.status} ` +
+    `location=${location || '<none>'} ` +
+    `serverTiming=${JSON.stringify(authResponse.timings)} ` +
+    `body=${responsePreview || '<empty>'}`
+  );
 }
 
 export function handleSummary(data) {
@@ -128,41 +155,38 @@ export function handleSummary(data) {
   const count = (name) => metrics[name]?.values?.count || 0;
   const rate = metrics.login_success_rate?.values?.rate || 0;
 
-  const attempts = count('login_attempts');
-  const csrfOk = count('csrf_success');
-  const csrfBad = count('csrf_failure');
-  const authTry = count('auth_attempts');
-  const success = count('auth_success');
-  const failure = count('auth_failure');
-
   const report = {
     test: {
-      name: 'E-UJIAN ramp-up concurrent login',
+      name: 'E-UJIAN ramp-up concurrent login diagnostic',
       base_url: BASE_URL,
       configured_vus: VUS,
       account_range: `001-${String(VUS).padStart(3, '0')}`,
       executor: 'ramping-vus',
+      iteration_policy: 'one login attempt per VU; repeat iterations ignored',
       generated_at: new Date().toISOString(),
     },
     requests: {
-      get_login: attempts,
-      post_auth: authTry,
-      total_http_requests: attempts + authTry,
+      get_login: count('login_attempts'),
+      post_auth: count('auth_attempts'),
+      total_http_requests: count('login_attempts') + count('auth_attempts'),
     },
     result: {
-      login_attempts: attempts,
-      csrf_success: csrfOk,
-      csrf_failure: csrfBad,
-      auth_attempts: authTry,
-      auth_success: success,
-      auth_failure: failure,
+      login_attempts: count('login_attempts'),
+      csrf_success: count('csrf_success'),
+      csrf_failure: count('csrf_failure'),
+      auth_attempts: count('auth_attempts'),
+      auth_success: count('auth_success'),
+      auth_failure: count('auth_failure'),
+      ticket_rejected: count('ticket_rejected'),
+      auth_http_unexpected: count('auth_http_unexpected'),
+      auth_redirect_wrong: count('auth_redirect_wrong'),
       login_success_rate: rate,
     },
     metrics: data.metrics,
   };
 
   return {
-    stdout: `\nE-UJIAN K6 RAMP-UP LOGIN TEST\n=============================\nBASE_URL          : ${BASE_URL}\nCONFIGURED VUS    : ${VUS}\nACCOUNT RANGE     : 001-${String(VUS).padStart(3, '0')}\nEXECUTOR          : ramping-vus\nGET /login        : ${attempts}\nCSRF SUCCESS      : ${csrfOk}\nCSRF FAILURE      : ${csrfBad}\nPOST /auth        : ${authTry}\nAUTH SUCCESS      : ${success}\nAUTH FAILURE      : ${failure}\nTOTAL HTTP REQ    : ${attempts + authTry}\nSUCCESS RATE      : ${(rate * 100).toFixed(2)}%\n`,
+    stdout: `\nE-UJIAN K6 RAMP-UP LOGIN DIAGNOSTIC\n====================================\nBASE_URL             : ${BASE_URL}\nCONFIGURED VUS       : ${VUS}\nACCOUNT RANGE        : 001-${String(VUS).padStart(3, '0')}\nITERATION POLICY     : one attempt per VU\nGET /login           : ${count('login_attempts')}\nCSRF SUCCESS         : ${count('csrf_success')}\nCSRF FAILURE         : ${count('csrf_failure')}\nPOST /auth           : ${count('auth_attempts')}\nAUTH SUCCESS         : ${count('auth_success')}\nAUTH FAILURE         : ${count('auth_failure')}\nAUTH HTTP UNEXPECTED : ${count('auth_http_unexpected')}\nAUTH REDIRECT WRONG  : ${count('auth_redirect_wrong')}\nTOTAL HTTP REQ       : ${count('login_attempts') + count('auth_attempts')}\nSUCCESS RATE         : ${(rate * 100).toFixed(2)}%\n`,
     [__ENV.K6_SUMMARY_FILE || 'summary.json']: JSON.stringify(report, null, 2),
   };
 }
